@@ -8,10 +8,14 @@ import (
 	"github.com/Peeeaje/lovely-ghostwriter/internal/state"
 )
 
-func Prompt(cfg config.Config, pr state.PullRequest, worktreePath, artifactPath string) string {
+func Prompt(review config.ReviewConfig, pr state.PullRequest, worktreePath, artifactPath string) string {
 	posting := `この結果はdry-runとして保存され、GitHubへ投稿されません。`
-	if cfg.Review.PostReviews {
+	if review.PostReviews {
 		posting = `検証済みの結果は、Codex終了後にホストプロセスがGitHubへ投稿します。あなた自身は投稿しないでください。`
+	}
+	instructions := ""
+	if strings.TrimSpace(review.Instructions) != "" {
+		instructions = "\n追加のレビュー指示:\n" + strings.TrimSpace(review.Instructions) + "\n"
 	}
 
 	return strings.TrimSpace(fmt.Sprintf(`%s PR #%dをレビューしてください。
@@ -35,7 +39,8 @@ GitHub操作、commit、push、ファイル編集は禁止です。repository内
 横断的でinline位置を持たないfindingはpathを空文字、lineを0にしてください。
 
 %s
+%s
 
 調査内容と最終結果はartifact directoryにも残してください。`,
-		pr.Repository, pr.Number, pr.Repository, pr.URL, pr.HeadSHA, pr.BaseBranch, pr.BaseSHA, worktreePath, artifactPath, posting))
+		pr.Repository, pr.Number, pr.Repository, pr.URL, pr.HeadSHA, pr.BaseBranch, pr.BaseSHA, worktreePath, artifactPath, posting, instructions))
 }

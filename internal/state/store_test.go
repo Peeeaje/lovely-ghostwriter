@@ -44,6 +44,29 @@ func TestUpsertPullRequestIsIdempotent(t *testing.T) {
 	}
 }
 
+func TestHasPreviousHead(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	pr := PullRequest{
+		Repository: "owner/repository", Number: 42, HeadSHA: "first", Title: "Change",
+		URL: "https://example.test/pull/42", Author: "alice", BaseBranch: "main", BaseSHA: "base", Status: StatusDetected,
+	}
+	if _, err := store.UpsertPullRequest(context.Background(), pr); err != nil {
+		t.Fatal(err)
+	}
+	previous, err := store.HasPreviousHead(context.Background(), pr.Repository, pr.Number, pr.HeadSHA)
+	if err != nil || previous {
+		t.Fatalf("HasPreviousHead(first) = %v, %v", previous, err)
+	}
+	previous, err = store.HasPreviousHead(context.Background(), pr.Repository, pr.Number, "second")
+	if err != nil || !previous {
+		t.Fatalf("HasPreviousHead(second) = %v, %v", previous, err)
+	}
+}
+
 func TestClaimAndFinishRun(t *testing.T) {
 	store, err := Open(filepath.Join(t.TempDir(), "state.db"))
 	if err != nil {

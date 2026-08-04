@@ -48,7 +48,7 @@ func (p *Pool) StartAvailable(ctx context.Context) (int, error) {
 			_ = p.store.FinishRun(ctx, run, state.StatusFailed, err)
 			continue
 		}
-		posted, err := p.runner.RecoveredReviewPosted(ctx, pr)
+		posted, err := p.runner.RecoveredReviewPosted(ctx, repository, pr)
 		if err != nil {
 			_ = p.store.FinishRun(ctx, run, state.StatusFailed, err)
 			p.recordError(err)
@@ -89,11 +89,17 @@ func (p *Pool) StartAvailable(ctx context.Context) (int, error) {
 				<-p.sem
 				p.wg.Done()
 			}()
+			if err := p.runner.NotifyStarted(context.Background(), pr); err != nil {
+				fmt.Fprintf(p.output, "notification warning: %v\n", err)
+			}
 			status, runErr := p.runner.Run(ctx, repository, pr, run)
 			if err := p.store.FinishRun(context.Background(), run, status, runErr); err != nil {
 				p.recordError(err)
 				fmt.Fprintf(p.output, "failed to persist %s#%d run=%d: %v\n", pr.Repository, pr.Number, run.ID, err)
 				return
+			}
+			if err := p.runner.NotifyFinished(context.Background(), pr, status, runErr); err != nil {
+				fmt.Fprintf(p.output, "notification warning: %v\n", err)
 			}
 			if runErr != nil {
 				p.recordError(runErr)

@@ -15,6 +15,7 @@ import (
 type Config struct {
 	Daemon       DaemonConfig       `toml:"daemon"`
 	Review       ReviewConfig       `toml:"review"`
+	Notification NotificationConfig `toml:"notification"`
 	Repositories []RepositoryConfig `toml:"repository"`
 }
 
@@ -31,18 +32,48 @@ type ReviewConfig struct {
 	Marker          string   `toml:"marker"`
 	PostReviews     bool     `toml:"post_reviews"`
 	ExtraArgs       []string `toml:"extra_args"`
+	Instructions    string   `toml:"instructions"`
+}
+
+type ReviewOverride struct {
+	Command         string   `toml:"command,omitempty"`
+	Model           string   `toml:"model,omitempty"`
+	ReasoningEffort string   `toml:"reasoning_effort,omitempty"`
+	Sandbox         string   `toml:"sandbox,omitempty"`
+	Marker          string   `toml:"marker,omitempty"`
+	PostReviews     *bool    `toml:"post_reviews,omitempty"`
+	ExtraArgs       []string `toml:"extra_args,omitempty"`
+	Instructions    string   `toml:"instructions,omitempty"`
+}
+
+type NotificationConfig struct {
+	Enabled  bool   `toml:"enabled"`
+	Command  string `toml:"command"`
+	Timeout  string `toml:"timeout"`
+	Started  bool   `toml:"started"`
+	Finished bool   `toml:"finished"`
+	Failed   bool   `toml:"failed"`
 }
 
 type RepositoryConfig struct {
-	Name           string   `toml:"name"`
-	Path           string   `toml:"path"`
-	BaseBranches   []string `toml:"base_branches"`
-	Authors        []string `toml:"authors"`
-	Reviewers      []string `toml:"reviewers"`
-	Teams          []string `toml:"teams"`
-	ExcludeAuthors []string `toml:"exclude_authors"`
-	IncludeDrafts  bool     `toml:"include_drafts"`
+	Name           string         `toml:"name"`
+	Path           string         `toml:"path"`
+	BaseBranches   []string       `toml:"base_branches"`
+	Authors        []string       `toml:"authors"`
+	Reviewers      []string       `toml:"reviewers"`
+	Teams          []string       `toml:"teams"`
+	ExcludeAuthors []string       `toml:"exclude_authors"`
+	IncludeDrafts  bool           `toml:"include_drafts"`
+	InitialTrigger string         `toml:"initial_trigger"`
+	UpdateTrigger  string         `toml:"update_trigger"`
+	Review         ReviewOverride `toml:"review,omitempty"`
 }
+
+const (
+	TriggerReviewRequest = "review-request"
+	TriggerAlways        = "always"
+	TriggerManual        = "manual"
+)
 
 func Default() Config {
 	return Config{
@@ -58,12 +89,21 @@ func Default() Config {
 			Marker:          "codex-auto-review",
 			PostReviews:     false,
 		},
+		Notification: NotificationConfig{
+			Command:  "terminal-notifier",
+			Timeout:  "5s",
+			Started:  true,
+			Finished: true,
+			Failed:   true,
+		},
 		Repositories: []RepositoryConfig{{
 			Name:           "owner/repository",
 			Path:           "~/src/repository",
 			BaseBranches:   []string{"main"},
 			Reviewers:      []string{"your-github-login"},
 			ExcludeAuthors: []string{"app/dependabot", "app/renovate", "dependabot[bot]", "renovate[bot]"},
+			InitialTrigger: TriggerReviewRequest,
+			UpdateTrigger:  TriggerReviewRequest,
 		}},
 	}
 }
@@ -77,6 +117,14 @@ func Load(path string) (Config, error) {
 	cfg := Default()
 	if err := toml.Unmarshal(data, &cfg); err != nil {
 		return Config{}, fmt.Errorf("parse config %s: %w", path, err)
+	}
+	for i := range cfg.Repositories {
+		if cfg.Repositories[i].InitialTrigger == "" {
+			cfg.Repositories[i].InitialTrigger = TriggerReviewRequest
+		}
+		if cfg.Repositories[i].UpdateTrigger == "" {
+			cfg.Repositories[i].UpdateTrigger = TriggerReviewRequest
+		}
 	}
 	if err := cfg.Validate(); err != nil {
 		return Config{}, err
@@ -132,6 +180,12 @@ func (c Config) Validate() error {
 	if strings.TrimSpace(c.Review.Marker) == "" {
 		return errors.New("review.marker is required")
 	}
+	if c.Notification.Enabled && strings.TrimSpace(c.Notification.Command) == "" {
+		return errors.New("notification.command is required when notifications are enabled")
+	}
+	if _, err := c.NotificationTimeout(); err != nil {
+		return err
+	}
 	if len(c.Repositories) == 0 {
 		return errors.New("at least one [[repository]] is required")
 	}
@@ -148,8 +202,17 @@ func (c Config) Validate() error {
 		if len(repo.BaseBranches) == 0 {
 			return fmt.Errorf("%s.base_branches must not be empty", prefix)
 		}
-		if len(repo.Reviewers) == 0 && len(repo.Teams) == 0 {
+		if !validTrigger(repo.InitialTrigger) {
+			return fmt.Errorf("%s.initial_trigger must be review-request, always, or manual", prefix)
+		}
+		if !validTrigger(repo.UpdateTrigger) {
+			return fmt.Errorf("%s.update_trigger must be review-request, always, or manual", prefix)
+		}
+		if (repo.InitialTrigger == TriggerReviewRequest || repo.UpdateTrigger == TriggerReviewRequest) && len(repo.Reviewers) == 0 && len(repo.Teams) == 0 {
 			return fmt.Errorf("%s requires at least one reviewer or team", prefix)
+		}
+		if err := repo.EffectiveReview(c.Review).validate(prefix + ".review"); err != nil {
+			return err
 		}
 		if _, ok := seen[repo.Name]; ok {
 			return fmt.Errorf("duplicate repository: %s", repo.Name)
@@ -157,6 +220,75 @@ func (c Config) Validate() error {
 		seen[repo.Name] = struct{}{}
 	}
 	return nil
+}
+
+func (c Config) NotificationTimeout() (time.Duration, error) {
+	timeout, err := time.ParseDuration(c.Notification.Timeout)
+	if err != nil {
+		return 0, fmt.Errorf("notification.timeout: %w", err)
+	}
+	if timeout <= 0 {
+		return 0, errors.New("notification.timeout must be positive")
+	}
+	return timeout, nil
+}
+
+func validTrigger(trigger string) bool {
+	return slices.Contains([]string{TriggerReviewRequest, TriggerAlways, TriggerManual}, trigger)
+}
+
+func (r ReviewConfig) validate(prefix string) error {
+	if strings.TrimSpace(r.Command) == "" {
+		return fmt.Errorf("%s.command is required", prefix)
+	}
+	if !slices.Contains([]string{"read-only", "workspace-write", "danger-full-access"}, r.Sandbox) {
+		return fmt.Errorf("%s.sandbox must be read-only, workspace-write, or danger-full-access", prefix)
+	}
+	if strings.TrimSpace(r.Marker) == "" {
+		return fmt.Errorf("%s.marker is required", prefix)
+	}
+	return nil
+}
+
+func (r RepositoryConfig) EffectiveReview(global ReviewConfig) ReviewConfig {
+	if r.Review.Command != "" {
+		global.Command = r.Review.Command
+	}
+	if r.Review.Model != "" {
+		global.Model = r.Review.Model
+	}
+	if r.Review.ReasoningEffort != "" {
+		global.ReasoningEffort = r.Review.ReasoningEffort
+	}
+	if r.Review.Sandbox != "" {
+		global.Sandbox = r.Review.Sandbox
+	}
+	if r.Review.Marker != "" {
+		global.Marker = r.Review.Marker
+	}
+	if r.Review.PostReviews != nil {
+		global.PostReviews = *r.Review.PostReviews
+	}
+	if r.Review.ExtraArgs != nil {
+		global.ExtraArgs = r.Review.ExtraArgs
+	}
+	if r.Review.Instructions != "" {
+		global.Instructions = r.Review.Instructions
+	}
+	return global
+}
+
+func (r RepositoryConfig) Trigger(isUpdate bool) string {
+	if isUpdate {
+		if r.UpdateTrigger != "" {
+			return r.UpdateTrigger
+		}
+		return TriggerReviewRequest
+	}
+	if r.InitialTrigger != "" {
+		return r.InitialTrigger
+	}
+	return TriggerReviewRequest
 }
 
 func (r RepositoryConfig) AutoReviewBase(branch string) bool {

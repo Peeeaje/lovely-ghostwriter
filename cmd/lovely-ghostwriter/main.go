@@ -263,14 +263,14 @@ func enqueue(ctx context.Context, opts options, args []string, out io.Writer) er
 		return err
 	}
 	defer store.Close()
-	configured := false
+	var repositoryConfig config.RepositoryConfig
 	for _, repository := range cfg.Repositories {
 		if repository.Name == repositoryName {
-			configured = true
+			repositoryConfig = repository
 			break
 		}
 	}
-	if !configured {
+	if repositoryConfig.Name == "" {
 		return fmt.Errorf("repository %s is not configured", repositoryName)
 	}
 
@@ -286,7 +286,8 @@ func enqueue(ctx context.Context, opts options, args []string, out io.Writer) er
 	if err != nil {
 		return err
 	}
-	if gh.HasMarker(pr, cfg.Review.Marker, pr.HeadSHA, reviewer) && !force {
+	review := repositoryConfig.EffectiveReview(cfg.Review)
+	if gh.HasMarker(pr, review.Marker, pr.HeadSHA, reviewer) && !force {
 		return fmt.Errorf("pull request %s already has a review marker for head %s; use --force to rerun", ref, pr.HeadSHA)
 	}
 	queued, err := store.Enqueue(ctx, state.PullRequest{
@@ -384,8 +385,14 @@ func doctor(opts options, out io.Writer) error {
 		return err
 	}
 
-	commands := []string{"git", "gh", cfg.Review.Command}
-	for _, command := range commands {
+	commands := map[string]struct{}{"git": {}, "gh": {}, cfg.Review.Command: {}}
+	for _, repository := range cfg.Repositories {
+		commands[repository.EffectiveReview(cfg.Review).Command] = struct{}{}
+	}
+	if cfg.Notification.Enabled {
+		commands[cfg.Notification.Command] = struct{}{}
+	}
+	for command := range commands {
 		path, err := exec.LookPath(command)
 		if err != nil {
 			return fmt.Errorf("required command %q was not found", command)

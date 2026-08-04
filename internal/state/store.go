@@ -405,6 +405,20 @@ ORDER BY id DESC LIMIT 1
 	return runID, true, nil
 }
 
+func (s *Store) HasPreviousHead(ctx context.Context, repository string, number int, headSHA string) (bool, error) {
+	var previous bool
+	err := s.db.QueryRowContext(ctx, `
+SELECT EXISTS (
+  SELECT 1 FROM pull_requests
+  WHERE repository = ? AND number = ? AND head_sha <> ?
+)
+`, repository, number, headSHA).Scan(&previous)
+	if err != nil {
+		return false, fmt.Errorf("check previous pull request head: %w", err)
+	}
+	return previous, nil
+}
+
 func (s *Store) MarkReviewed(ctx context.Context, repository string, number int, headSHA string, runID int64) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {

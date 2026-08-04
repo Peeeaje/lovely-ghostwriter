@@ -32,6 +32,7 @@ type Runner struct {
 }
 
 func (r *Runner) PrepareAutomatic(ctx context.Context, repository config.RepositoryConfig, target state.PullRequest) (state.PullRequest, bool, error) {
+	review := repository.EffectiveReview(r.Config.Review)
 	current, err := r.GitHub.PullRequest(ctx, target.Repository, target.Number)
 	if err != nil {
 		return target, false, err
@@ -48,10 +49,18 @@ func (r *Runner) PrepareAutomatic(ctx context.Context, repository config.Reposit
 	if !repository.AutoReviewBase(current.BaseBranch) {
 		return target, false, nil
 	}
-	return target, policy.Automatic(repository, current, r.Config.Review.Marker, reviewer), nil
+	trigger := repository.Trigger(false)
+	if trigger != repository.Trigger(true) {
+		isUpdate, err := r.Store.HasPreviousHead(ctx, target.Repository, target.Number, target.HeadSHA)
+		if err != nil {
+			return target, false, err
+		}
+		trigger = repository.Trigger(isUpdate)
+	}
+	return target, policy.Automatic(repository, current, review.Marker, reviewer, trigger), nil
 }
 
-func (r *Runner) RecoveredReviewPosted(ctx context.Context, target state.PullRequest) (bool, error) {
+func (r *Runner) RecoveredReviewPosted(ctx context.Context, repository config.RepositoryConfig, target state.PullRequest) (bool, error) {
 	if target.RecoveryRunID == 0 {
 		return false, nil
 	}
@@ -63,11 +72,13 @@ func (r *Runner) RecoveredReviewPosted(ctx context.Context, target state.PullReq
 	if err != nil {
 		return false, err
 	}
-	return gh.HasRunMarker(current, r.Config.Review.Marker, target.HeadSHA, reviewer, target.RecoveryRunID), nil
+	review := repository.EffectiveReview(r.Config.Review)
+	return gh.HasRunMarker(current, review.Marker, target.HeadSHA, reviewer, target.RecoveryRunID), nil
 }
 
 func (r *Runner) Run(ctx context.Context, repository config.RepositoryConfig, pr state.PullRequest, run state.Run) (status state.Status, runErr error) {
 	status = state.StatusFailed
+	review := repository.EffectiveReview(r.Config.Review)
 	sourcePath, err := repository.ExpandedPath()
 	if err != nil {
 		return status, err
@@ -110,7 +121,7 @@ func (r *Runner) Run(ctx context.Context, repository config.RepositoryConfig, pr
 		return status, fmt.Errorf("write pull request context: %w", err)
 	}
 
-	prompt := Prompt(r.Config, pr, worktreePath, artifactPath)
+	prompt := Prompt(review, pr, worktreePath, artifactPath)
 	if err := os.WriteFile(filepath.Join(artifactPath, "prompt.md"), []byte(prompt+"\n"), 0o644); err != nil {
 		return status, fmt.Errorf("write prompt: %w", err)
 	}
@@ -131,20 +142,20 @@ func (r *Runner) Run(ctx context.Context, repository config.RepositoryConfig, pr
 		"-C", artifactPath,
 		"--add-dir", worktreePath,
 		"--skip-git-repo-check",
-		"--sandbox", r.Config.Review.Sandbox,
+		"--sandbox", review.Sandbox,
 		"--output-schema", schemaPath,
 		"--output-last-message", resultPath,
 	}
-	if r.Config.Review.ReasoningEffort != "" {
-		args = append(args, "-c", "model_reasoning_effort="+strconv.Quote(r.Config.Review.ReasoningEffort))
+	if review.ReasoningEffort != "" {
+		args = append(args, "-c", "model_reasoning_effort="+strconv.Quote(review.ReasoningEffort))
 	}
-	if r.Config.Review.Model != "" {
-		args = append(args, "--model", r.Config.Review.Model)
+	if review.Model != "" {
+		args = append(args, "--model", review.Model)
 	}
-	args = append(args, r.Config.Review.ExtraArgs...)
+	args = append(args, review.ExtraArgs...)
 	args = append(args, "-")
 
-	command := exec.CommandContext(ctx, r.Config.Review.Command, args...)
+	command := exec.CommandContext(ctx, review.Command, args...)
 	command.Dir = artifactPath
 	command.Stdin = strings.NewReader(prompt)
 	command.Stdout = logFile
@@ -160,7 +171,7 @@ func (r *Runner) Run(ctx context.Context, repository config.RepositoryConfig, pr
 	if err != nil {
 		return status, err
 	}
-	if !r.Config.Review.PostReviews {
+	if !review.PostReviews {
 		return state.StatusCompleted, nil
 	}
 
@@ -175,14 +186,14 @@ func (r *Runner) Run(ctx context.Context, repository config.RepositoryConfig, pr
 	if err != nil {
 		return status, err
 	}
-	if _, err := r.GitHub.SubmitReview(ctx, pr.Repository, pr.Number, submission(result, r.Config.Review.Marker, reviewer, pr, run.ID)); err != nil {
+	if _, err := r.GitHub.SubmitReview(ctx, pr.Repository, pr.Number, submission(result, review.Marker, reviewer, pr, run.ID)); err != nil {
 		return status, err
 	}
 	posted, err := r.GitHub.PullRequest(ctx, pr.Repository, pr.Number)
 	if err != nil {
 		return status, err
 	}
-	if !gh.HasRunMarker(posted, r.Config.Review.Marker, pr.HeadSHA, reviewer, run.ID) {
+	if !gh.HasRunMarker(posted, review.Marker, pr.HeadSHA, reviewer, run.ID) {
 		return status, fmt.Errorf("submitted review marker was not found for run %d", run.ID)
 	}
 	return state.StatusReviewed, nil

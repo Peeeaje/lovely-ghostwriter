@@ -25,6 +25,11 @@ type fakeStore struct {
 	prs         []state.PullRequest
 	failedRunID int64
 	reviewed    []int
+	updates     map[int]bool
+}
+
+func (f *fakeStore) HasPreviousHead(_ context.Context, _ string, number int, _ string) (bool, error) {
+	return f.updates[number], nil
 }
 
 func (f *fakeStore) LatestFailedRunID(context.Context, string, int, string) (int64, bool, error) {
@@ -72,5 +77,29 @@ func TestScanFiltersAndClassifiesPullRequests(t *testing.T) {
 	}
 	if len(store.reviewed) != 1 || store.reviewed[0] != 4 {
 		t.Fatalf("reviewed = %v", store.reviewed)
+	}
+}
+
+func TestScanUsesDifferentInitialAndUpdateTriggers(t *testing.T) {
+	source := fakeSource{prs: []gh.PullRequest{
+		{Number: 1, State: "OPEN", HeadSHA: "initial", BaseBranch: "main", BaseSHA: "base", Author: gh.Actor{Login: "alice"}},
+		{Number: 2, State: "OPEN", HeadSHA: "update", BaseBranch: "main", BaseSHA: "base", Author: gh.Actor{Login: "alice"}},
+	}}
+	store := &fakeStore{updates: map[int]bool{2: true}}
+	cfg := config.Default()
+	cfg.Repositories[0] = config.RepositoryConfig{
+		Name: "owner/repository", Path: "/tmp/repository", BaseBranches: []string{"main"},
+		Authors: []string{"alice"}, InitialTrigger: config.TriggerAlways, UpdateTrigger: config.TriggerManual,
+	}
+
+	result, err := New(source, store).Scan(context.Background(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Queued != 1 || result.Detected != 1 || len(store.prs) != 2 {
+		t.Fatalf("Scan() result=%+v prs=%+v", result, store.prs)
+	}
+	if store.prs[0].Status != state.StatusQueued || store.prs[1].Status != state.StatusDetected {
+		t.Fatalf("statuses = %s, %s", store.prs[0].Status, store.prs[1].Status)
 	}
 }

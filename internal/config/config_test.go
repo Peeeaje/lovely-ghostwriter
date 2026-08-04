@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -51,6 +52,20 @@ reviewers = ["reviewer"]
 	if len(cfg.Repositories) != 1 || cfg.Repositories[0].Name != "owner/repository" {
 		t.Fatalf("repositories = %+v", cfg.Repositories)
 	}
+	if cfg.Repositories[0].InitialTrigger != TriggerReviewRequest || cfg.Repositories[0].UpdateTrigger != TriggerReviewRequest {
+		t.Fatalf("legacy triggers = %+v", cfg.Repositories[0])
+	}
+}
+
+func TestRepositoryReviewOverridesGlobalReview(t *testing.T) {
+	post := true
+	repository := RepositoryConfig{Review: ReviewOverride{
+		Model: "repository-model", PostReviews: &post, Instructions: "Check the contract.", ExtraArgs: []string{},
+	}}
+	review := repository.EffectiveReview(ReviewConfig{Model: "global-model", Sandbox: "workspace-write", Marker: "marker"})
+	if review.Model != "repository-model" || !review.PostReviews || review.Instructions != "Check the contract." || review.ExtraArgs == nil {
+		t.Fatalf("EffectiveReview() = %+v", review)
+	}
 }
 
 func TestWriteAndLoad(t *testing.T) {
@@ -64,5 +79,12 @@ func TestWriteAndLoad(t *testing.T) {
 	}
 	if cfg.Repositories[0].Name != "owner/repository" {
 		t.Fatalf("repository name = %q", cfg.Repositories[0].Name)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), "[repository.review]") {
+		t.Fatalf("default config contains an empty repository override: %s", data)
 	}
 }
