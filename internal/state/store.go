@@ -269,7 +269,7 @@ UPDATE runs SET status = ?, ended_at = ?, error = ? WHERE id = ?
 		return fmt.Errorf("finish run: %w", err)
 	}
 	if _, err := tx.ExecContext(ctx, `
-UPDATE pull_requests SET status = ?, updated_at = ?
+UPDATE pull_requests SET status = ?, manual = 0, updated_at = ?
 WHERE repository = ? AND number = ? AND head_sha = ?
 `, status, now.Format(time.RFC3339), run.Repository, run.Number, run.HeadSHA); err != nil {
 		return fmt.Errorf("finish pull request: %w", err)

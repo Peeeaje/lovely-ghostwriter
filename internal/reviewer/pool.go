@@ -114,7 +114,8 @@ func (p *Pool) Drain(ctx context.Context) error {
 	for {
 		started, err := p.StartAvailable(ctx)
 		if err != nil {
-			return err
+			p.Wait()
+			return errors.Join(append([]error{err}, p.takeErrors()...)...)
 		}
 		p.Wait()
 		if started == 0 {

@@ -115,6 +115,39 @@ func TestEnqueuePromotesDetectedWithoutForce(t *testing.T) {
 	}
 }
 
+func TestFinishRunClearsManualQueueMode(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	pr := PullRequest{
+		Repository: "owner/repository", Number: 42, HeadSHA: "head", Title: "Change",
+		URL: "https://github.com/owner/repository/pull/42", Author: "alice",
+		BaseBranch: "release", BaseSHA: "release-base", Manual: true, Status: StatusQueued,
+	}
+	if _, err := store.UpsertPullRequest(context.Background(), pr); err != nil {
+		t.Fatal(err)
+	}
+	_, run, ok, err := store.ClaimNext(context.Background())
+	if err != nil || !ok {
+		t.Fatalf("ClaimNext() ok=%v err=%v", ok, err)
+	}
+	if err := store.FinishRun(context.Background(), run, StatusCompleted, nil); err != nil {
+		t.Fatal(err)
+	}
+	pr.Manual = false
+	pr.BaseBranch = "main"
+	pr.BaseSHA = "main-base"
+	if _, err := store.UpsertPullRequest(context.Background(), pr); err != nil {
+		t.Fatal(err)
+	}
+	queued, _, ok, err := store.ClaimNext(context.Background())
+	if err != nil || !ok || queued.Manual {
+		t.Fatalf("ClaimNext() pr=%+v ok=%v err=%v", queued, ok, err)
+	}
+}
+
 func TestFailedEnqueueDoesNotMakeAutomaticQueueManual(t *testing.T) {
 	store, err := Open(filepath.Join(t.TempDir(), "state.db"))
 	if err != nil {
