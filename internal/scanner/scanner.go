@@ -17,15 +17,17 @@ type PullRequestSource interface {
 
 type PullRequestStore interface {
 	UpsertPullRequest(context.Context, state.PullRequest) (bool, error)
-	HasPreviousHead(context.Context, string, int, string) (bool, error)
+	HasPreviousRevision(context.Context, string, int, string, string) (bool, error)
+	RevisionExists(context.Context, string, int, string, string) (bool, error)
 	LatestFailedRunID(context.Context, string, int, string) (int64, bool, error)
 	MarkReviewed(context.Context, string, int, string, int64) error
 }
 
 type Result struct {
-	Queued   int
-	Detected int
-	Skipped  int
+	Queued               int
+	Detected             int
+	Skipped              int
+	DetectedPullRequests []state.PullRequest
 }
 
 type Scanner struct {
@@ -50,12 +52,16 @@ func (s *Scanner) Scan(ctx context.Context, cfg config.Config) (Result, error) {
 		}
 		for _, pr := range prs {
 			review := repository.EffectiveReview(cfg.Review)
-			if gh.HasMarker(pr, review.Marker, pr.HeadSHA, reviewer) {
+			if repository.PatchPullRequest(cfg.Patch, pr.Title, pr.HeadBranch, pr.Author.Login, reviewer, pr.IsCrossRepository) {
+				result.Skipped++
+				continue
+			}
+			if gh.HasMarker(pr, review.Marker, pr.HeadSHA, pr.BaseSHA, reviewer) {
 				runID, failed, err := s.store.LatestFailedRunID(ctx, repository.Name, pr.Number, pr.HeadSHA)
 				if err != nil {
 					return result, err
 				}
-				if failed && gh.HasRunMarker(pr, review.Marker, pr.HeadSHA, reviewer, runID) {
+				if failed && gh.HasRunMarker(pr, review.Marker, pr.HeadSHA, pr.BaseSHA, reviewer, runID) {
 					if err := s.store.MarkReviewed(ctx, repository.Name, pr.Number, pr.HeadSHA, runID); err != nil {
 						return result, err
 					}
@@ -69,7 +75,7 @@ func (s *Scanner) Scan(ctx context.Context, cfg config.Config) (Result, error) {
 			}
 			trigger := repository.Trigger(false)
 			if trigger != repository.Trigger(true) {
-				isUpdate, err := s.store.HasPreviousHead(ctx, repository.Name, pr.Number, pr.HeadSHA)
+				isUpdate, err := s.store.HasPreviousRevision(ctx, repository.Name, pr.Number, pr.HeadSHA, pr.BaseSHA)
 				if err != nil {
 					return result, err
 				}
@@ -80,7 +86,7 @@ func (s *Scanner) Scan(ctx context.Context, cfg config.Config) (Result, error) {
 			if repository.AutoReviewBase(pr.BaseBranch) && policy.Automatic(repository, pr, review.Marker, reviewer, trigger) {
 				status = state.StatusQueued
 			}
-			created, err := s.store.UpsertPullRequest(ctx, state.PullRequest{
+			candidate := state.PullRequest{
 				Repository: repository.Name,
 				Number:     pr.Number,
 				HeadSHA:    pr.HeadSHA,
@@ -90,17 +96,23 @@ func (s *Scanner) Scan(ctx context.Context, cfg config.Config) (Result, error) {
 				BaseBranch: pr.BaseBranch,
 				BaseSHA:    pr.BaseSHA,
 				Status:     status,
-			})
+			}
+			knownRevision, err := s.store.RevisionExists(ctx, repository.Name, pr.Number, pr.HeadSHA, pr.BaseSHA)
+			if err != nil {
+				return result, err
+			}
+			created, err := s.store.UpsertPullRequest(ctx, candidate)
 			if err != nil {
 				return result, fmt.Errorf("save %s#%d: %w", repository.Name, pr.Number, err)
 			}
-			if !created {
+			if !created && knownRevision {
 				continue
 			}
 			if status == state.StatusQueued {
 				result.Queued++
 			} else {
 				result.Detected++
+				result.DetectedPullRequests = append(result.DetectedPullRequests, candidate)
 			}
 		}
 	}

@@ -44,7 +44,7 @@ func TestUpsertPullRequestIsIdempotent(t *testing.T) {
 	}
 }
 
-func TestHasPreviousHead(t *testing.T) {
+func TestHasPreviousRevision(t *testing.T) {
 	store, err := Open(filepath.Join(t.TempDir(), "state.db"))
 	if err != nil {
 		t.Fatal(err)
@@ -57,13 +57,17 @@ func TestHasPreviousHead(t *testing.T) {
 	if _, err := store.UpsertPullRequest(context.Background(), pr); err != nil {
 		t.Fatal(err)
 	}
-	previous, err := store.HasPreviousHead(context.Background(), pr.Repository, pr.Number, pr.HeadSHA)
+	previous, err := store.HasPreviousRevision(context.Background(), pr.Repository, pr.Number, pr.HeadSHA, pr.BaseSHA)
 	if err != nil || previous {
-		t.Fatalf("HasPreviousHead(first) = %v, %v", previous, err)
+		t.Fatalf("HasPreviousRevision(first) = %v, %v", previous, err)
 	}
-	previous, err = store.HasPreviousHead(context.Background(), pr.Repository, pr.Number, "second")
+	previous, err = store.HasPreviousRevision(context.Background(), pr.Repository, pr.Number, "second", pr.BaseSHA)
 	if err != nil || !previous {
-		t.Fatalf("HasPreviousHead(second) = %v, %v", previous, err)
+		t.Fatalf("HasPreviousRevision(second head) = %v, %v", previous, err)
+	}
+	previous, err = store.HasPreviousRevision(context.Background(), pr.Repository, pr.Number, pr.HeadSHA, "new-base")
+	if err != nil || !previous {
+		t.Fatalf("HasPreviousRevision(second base) = %v, %v", previous, err)
 	}
 }
 
@@ -377,5 +381,200 @@ func TestRecoverInterruptedRequeuesRun(t *testing.T) {
 	recovered, nextRun, ok, err := store.ClaimNext(context.Background())
 	if err != nil || !ok || nextRun.Attempt != 2 || recovered.RecoveryRunID != run.ID {
 		t.Fatalf("recovered ClaimNext() pr=%+v run=%+v ok=%v err=%v", recovered, nextRun, ok, err)
+	}
+}
+
+func TestRecoverInterruptedPreservesCancel(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	pr := PullRequest{Repository: "owner/repository", Number: 42, HeadSHA: "head", Title: "Change", BaseBranch: "main", BaseSHA: "base", Status: StatusQueued}
+	if _, err := store.UpsertPullRequest(context.Background(), pr); err != nil {
+		t.Fatal(err)
+	}
+	_, run, ok, err := store.ClaimNext(context.Background())
+	if err != nil || !ok {
+		t.Fatalf("ClaimNext() ok=%v err=%v", ok, err)
+	}
+	if _, err := store.RequestCancel(context.Background(), pr.Repository, pr.Number); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.RecoverInterrupted(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, ok, err := store.ClaimNext(context.Background()); err != nil || ok {
+		t.Fatalf("ClaimNext() after canceled recovery ok=%v err=%v", ok, err)
+	}
+	counts, err := store.Counts(context.Background())
+	if err != nil || counts[StatusRejected] != 1 || counts[StatusQueued] != 0 {
+		t.Fatalf("Counts()=%v run=%+v err=%v", counts, run, err)
+	}
+}
+
+func TestClaimNextAllowsOnlyOneHeadPerPullRequest(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	for _, pr := range []PullRequest{
+		{Repository: "owner/repository", Number: 1, HeadSHA: "old", Title: "Old", BaseBranch: "main", BaseSHA: "base", Status: StatusQueued},
+		{Repository: "owner/repository", Number: 1, HeadSHA: "new", Title: "New", BaseBranch: "main", BaseSHA: "base", Status: StatusQueued},
+		{Repository: "owner/repository", Number: 2, HeadSHA: "other", Title: "Other", BaseBranch: "main", BaseSHA: "base", Status: StatusQueued},
+	} {
+		if _, err := store.UpsertPullRequest(context.Background(), pr); err != nil {
+			t.Fatal(err)
+		}
+	}
+	first, _, ok, err := store.ClaimNext(context.Background())
+	if err != nil || !ok || first.Number != 1 {
+		t.Fatalf("first ClaimNext() pr=%+v ok=%v err=%v", first, ok, err)
+	}
+	second, _, ok, err := store.ClaimNext(context.Background())
+	if err != nil || !ok || second.Number != 2 {
+		t.Fatalf("second ClaimNext() pr=%+v ok=%v err=%v", second, ok, err)
+	}
+}
+
+func TestRetargetRunMovesRunningStateToLatestHead(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	previous := PullRequest{Repository: "owner/repository", Number: 42, HeadSHA: "old", Title: "Change", BaseBranch: "main", BaseSHA: "base", Status: StatusQueued}
+	if _, err := store.UpsertPullRequest(context.Background(), previous); err != nil {
+		t.Fatal(err)
+	}
+	previous, run, ok, err := store.ClaimNext(context.Background())
+	if err != nil || !ok {
+		t.Fatalf("ClaimNext() ok=%v err=%v", ok, err)
+	}
+	current := previous
+	current.HeadSHA = "new"
+	current.Status = StatusRunning
+	if _, err := store.RetargetRun(context.Background(), &run, previous, current); err != nil {
+		t.Fatal(err)
+	}
+	if run.HeadSHA != "new" {
+		t.Fatalf("retargeted run = %+v", run)
+	}
+	if err := store.FinishRun(context.Background(), run, StatusReviewed, nil); err != nil {
+		t.Fatal(err)
+	}
+	counts, err := store.Counts(context.Background())
+	if err != nil || counts[StatusStale] != 1 || counts[StatusReviewed] != 1 {
+		t.Fatalf("Counts() = %v err=%v", counts, err)
+	}
+}
+
+func TestRetargetRunPreservesConcurrentCancel(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	previous := PullRequest{Repository: "owner/repository", Number: 42, HeadSHA: "old", Title: "Change", BaseBranch: "main", BaseSHA: "base", Status: StatusQueued}
+	if _, err := store.UpsertPullRequest(context.Background(), previous); err != nil {
+		t.Fatal(err)
+	}
+	previous, run, ok, err := store.ClaimNext(context.Background())
+	if err != nil || !ok {
+		t.Fatalf("ClaimNext() ok=%v err=%v", ok, err)
+	}
+	current := previous
+	current.HeadSHA = "new"
+	current.Status = StatusQueued
+	if _, err := store.UpsertPullRequest(context.Background(), current); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.RequestCancel(context.Background(), previous.Repository, previous.Number); err != nil {
+		t.Fatal(err)
+	}
+	_, err = store.RetargetRun(context.Background(), &run, previous, current)
+	var stopped StopRequestedError
+	if !errors.As(err, &stopped) || stopped.Status != StatusRejected || run.HeadSHA != previous.HeadSHA {
+		t.Fatalf("RetargetRun() run=%+v stopped=%+v err=%v", run, stopped, err)
+	}
+}
+
+func TestRetargetRunPreservesManualEnqueueOnCurrentHead(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	previous := PullRequest{Repository: "owner/repository", Number: 42, HeadSHA: "old", Title: "Change", BaseBranch: "main", BaseSHA: "base", Status: StatusQueued}
+	if _, err := store.UpsertPullRequest(context.Background(), previous); err != nil {
+		t.Fatal(err)
+	}
+	previous, run, ok, err := store.ClaimNext(context.Background())
+	if err != nil || !ok {
+		t.Fatalf("ClaimNext() ok=%v err=%v", ok, err)
+	}
+	current := previous
+	current.HeadSHA = "new"
+	current.Status = StatusQueued
+	current.Manual = true
+	if _, err := store.UpsertPullRequest(context.Background(), current); err != nil {
+		t.Fatal(err)
+	}
+	manual, err := store.RetargetRun(context.Background(), &run, previous, current)
+	if err != nil || !manual {
+		t.Fatalf("RetargetRun() manual=%v err=%v", manual, err)
+	}
+}
+
+func TestCancelRejectsQueuedHead(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	pr := PullRequest{Repository: "owner/repository", Number: 42, HeadSHA: "head", Title: "Change", BaseBranch: "main", BaseSHA: "base", Status: StatusQueued}
+	if _, err := store.UpsertPullRequest(context.Background(), pr); err != nil {
+		t.Fatal(err)
+	}
+	if rows, err := store.RequestCancel(context.Background(), pr.Repository, pr.Number); err != nil || rows != 1 {
+		t.Fatalf("RequestCancel() rows=%d err=%v", rows, err)
+	}
+	if _, err := store.UpsertPullRequest(context.Background(), pr); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, ok, err := store.ClaimNext(context.Background()); err != nil || ok {
+		t.Fatalf("ClaimNext() ok=%v err=%v", ok, err)
+	}
+	counts, _ := store.Counts(context.Background())
+	if counts[StatusRejected] != 1 {
+		t.Fatalf("Counts() = %v", counts)
+	}
+}
+
+func TestFinishRunPreservesConcurrentCancel(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	pr := PullRequest{Repository: "owner/repository", Number: 42, HeadSHA: "head", Title: "Change", BaseBranch: "main", BaseSHA: "base", Status: StatusQueued}
+	if _, err := store.UpsertPullRequest(context.Background(), pr); err != nil {
+		t.Fatal(err)
+	}
+	_, run, ok, err := store.ClaimNext(context.Background())
+	if err != nil || !ok {
+		t.Fatalf("ClaimNext() ok=%v err=%v", ok, err)
+	}
+	if _, err := store.RequestCancel(context.Background(), pr.Repository, pr.Number); err != nil {
+		t.Fatal(err)
+	}
+	status, err := store.FinishRunStatus(context.Background(), run, StatusReviewed, nil)
+	if err != nil || status != StatusRejected {
+		t.Fatalf("FinishRunStatus() status=%s err=%v", status, err)
+	}
+	counts, err := store.Counts(context.Background())
+	if err != nil || counts[StatusRejected] != 1 || counts[StatusReviewed] != 0 {
+		t.Fatalf("Counts()=%v err=%v", counts, err)
 	}
 }

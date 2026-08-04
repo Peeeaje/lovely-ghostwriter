@@ -92,13 +92,14 @@ func (p *Pool) StartAvailable(ctx context.Context) (int, error) {
 			if err := p.runner.NotifyStarted(context.Background(), pr); err != nil {
 				fmt.Fprintf(p.output, "notification warning: %v\n", err)
 			}
-			status, runErr := p.runner.Run(ctx, repository, pr, run)
-			if err := p.store.FinishRun(context.Background(), run, status, runErr); err != nil {
+			finishedRun, finishedPR, status, runErr := p.runner.Run(ctx, repository, pr, run)
+			status, err := p.store.FinishRunStatus(context.Background(), finishedRun, status, runErr)
+			if err != nil {
 				p.recordError(err)
 				fmt.Fprintf(p.output, "failed to persist %s#%d run=%d: %v\n", pr.Repository, pr.Number, run.ID, err)
 				return
 			}
-			if err := p.runner.NotifyFinished(context.Background(), pr, status, runErr); err != nil {
+			if err := p.runner.NotifyFinished(context.Background(), finishedPR, status, runErr); err != nil {
 				fmt.Fprintf(p.output, "notification warning: %v\n", err)
 			}
 			if runErr != nil {

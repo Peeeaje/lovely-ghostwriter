@@ -11,6 +11,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"syscall"
@@ -74,12 +75,25 @@ func run(args []string, stdout, stderr io.Writer) error {
 		return scanOnce(context.Background(), opts, stdout)
 	case "enqueue":
 		return enqueue(context.Background(), opts, remaining[1:], stdout)
+	case "cancel", "reject":
+		return cancel(context.Background(), opts, remaining[1:], stdout)
 	case "run-queue":
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer stop()
 		return runQueue(ctx, opts, stdout)
-	case "status":
-		return status(context.Background(), opts, stdout)
+	case "status", "list":
+		return status(context.Background(), opts, remaining[1:], stdout)
+	case "watch-running":
+		cfg, store, err := openConfiguredStore(opts)
+		if err != nil {
+			return err
+		}
+		defer store.Close()
+		return watchRunning(context.Background(), cfg, store, stdout)
+	case "logs":
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer stop()
+		return logs(ctx, opts, remaining[1:], stdout, stderr)
 	case "daemon":
 		return daemon(opts, stdout)
 	case "service":
@@ -109,8 +123,12 @@ Commands:
   doctor               Validate configuration and external dependencies
   scan                 Scan configured repositories once
   enqueue REPO#NUMBER  Queue one pull request (--force allows a rerun)
+  cancel REPO#NUMBER   Stop and locally reject the current pull request head
+  reject REPO#NUMBER   Alias for cancel
   run-queue            Run queued reviews and wait for completion
   status               Show detected and queued pull requests
+  watch-running        Stop running reviews whose pull request is closed
+  logs                 Show review logs (--follow, --tail N, --all)
   daemon               Scan continuously
   service install      Start at login using a macOS LaunchAgent
   service uninstall    Remove the macOS LaunchAgent
@@ -141,6 +159,9 @@ func scanOnce(ctx context.Context, opts options, out io.Writer) error {
 		return err
 	}
 	fmt.Fprintf(out, "queued=%d detected=%d skipped=%d\n", result.Queued, result.Detected, result.Skipped)
+	if err := reviewer.NotifyDetected(ctx, cfg, result.DetectedPullRequests); err != nil {
+		fmt.Fprintf(out, "notification warning: %v\n", err)
+	}
 	return nil
 }
 
@@ -150,10 +171,17 @@ func scanConfigured(ctx context.Context, cfg config.Config, store *state.Store, 
 		return err
 	}
 	fmt.Fprintf(out, "queued=%d detected=%d skipped=%d\n", result.Queued, result.Detected, result.Skipped)
+	if err := reviewer.NotifyDetected(ctx, cfg, result.DetectedPullRequests); err != nil {
+		fmt.Fprintf(out, "notification warning: %v\n", err)
+	}
 	return nil
 }
 
-func status(ctx context.Context, opts options, out io.Writer) error {
+func status(ctx context.Context, opts options, args []string, out io.Writer) error {
+	all := len(args) == 1 && args[0] == "--all"
+	if len(args) > 1 || len(args) == 1 && !all {
+		return errors.New("usage: lovely-ghostwriter status [--all]")
+	}
 	store, err := state.Open(opts.statePath)
 	if err != nil {
 		return err
@@ -166,14 +194,18 @@ func status(ctx context.Context, opts options, out io.Writer) error {
 	}
 	fmt.Fprintf(out, "queued=%d detected=%d running=%d failed=%d\n",
 		counts[state.StatusQueued], counts[state.StatusDetected], counts[state.StatusRunning], counts[state.StatusFailed])
-	prs, err := store.Active(ctx)
+	if all {
+		fmt.Fprintf(out, "reviewed=%d completed=%d stale=%d rejected=%d\n",
+			counts[state.StatusReviewed], counts[state.StatusCompleted], counts[state.StatusStale], counts[state.StatusRejected])
+	}
+	prs, err := store.PullRequests(ctx, all)
 	if err != nil {
 		return err
 	}
 	for _, pr := range prs {
 		fmt.Fprintf(out, "- %s#%d [%s] %s\n  %s\n", pr.Repository, pr.Number, pr.Status, pr.Title, pr.URL)
 	}
-	runs, err := store.ActiveRuns(ctx)
+	runs, err := store.Runs(ctx, all)
 	if err != nil {
 		return err
 	}
@@ -190,6 +222,149 @@ func status(ctx context.Context, opts options, out io.Writer) error {
 		}
 	}
 	return nil
+}
+
+func cancel(ctx context.Context, opts options, args []string, out io.Writer) error {
+	if len(args) == 0 {
+		return errors.New("usage: lovely-ghostwriter cancel OWNER/REPOSITORY#NUMBER [...] | NUMBER [...]")
+	}
+	cfg, store, err := openConfiguredStore(opts)
+	if err != nil {
+		return err
+	}
+	defer store.Close()
+	for _, arg := range args {
+		if strings.Contains(arg, "#") {
+			repository, number, err := parsePullRequestRef(arg)
+			if err != nil {
+				return err
+			}
+			if err := requestCancel(ctx, store, repository, number, out); err != nil {
+				return err
+			}
+			continue
+		}
+		number, err := strconv.Atoi(arg)
+		if err != nil || number < 1 {
+			return fmt.Errorf("invalid pull request number %q", arg)
+		}
+		active, err := store.PullRequests(ctx, false)
+		if err != nil {
+			return err
+		}
+		repositories := activeRepositories(cfg, active, number)
+		if len(repositories) == 0 {
+			return fmt.Errorf("pull request #%d is not active", number)
+		}
+		if len(repositories) > 1 {
+			return fmt.Errorf("pull request #%d is active in %s; specify OWNER/REPOSITORY#NUMBER", number, strings.Join(repositories, ", "))
+		}
+		if err := requestCancel(ctx, store, repositories[0], number, out); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func activeRepositories(cfg config.Config, pullRequests []state.PullRequest, number int) []string {
+	configured := make(map[string]bool, len(cfg.Repositories))
+	for _, repository := range cfg.Repositories {
+		configured[repository.Name] = true
+	}
+	matches := map[string]bool{}
+	for _, pullRequest := range pullRequests {
+		if pullRequest.Number == number && configured[pullRequest.Repository] {
+			matches[pullRequest.Repository] = true
+		}
+	}
+	var repositories []string
+	for repository := range matches {
+		repositories = append(repositories, repository)
+	}
+	sort.Strings(repositories)
+	return repositories
+}
+
+func requestCancel(ctx context.Context, store *state.Store, repository string, number int, out io.Writer) error {
+	rows, err := store.RequestCancel(ctx, repository, number)
+	if err != nil {
+		return err
+	}
+	if rows == 0 {
+		return fmt.Errorf("pull request %s#%d is not active", repository, number)
+	}
+	fmt.Fprintf(out, "cancel requested %s#%d\n", repository, number)
+	return nil
+}
+
+func logs(ctx context.Context, opts options, args []string, stdout, stderr io.Writer) error {
+	all, follow, tailLines := false, false, 200
+	filter := ""
+	for i := 0; i < len(args); i++ {
+		switch args[i] {
+		case "--all":
+			all = true
+		case "--follow":
+			follow = true
+		case "--tail":
+			i++
+			if i >= len(args) {
+				return errors.New("--tail requires a positive number")
+			}
+			value, err := strconv.Atoi(args[i])
+			if err != nil || value < 1 {
+				return errors.New("--tail requires a positive number")
+			}
+			tailLines = value
+		default:
+			if filter != "" {
+				return errors.New("usage: lovely-ghostwriter logs [PR] [--tail N] [--follow] [--all]")
+			}
+			filter = args[i]
+		}
+	}
+	store, err := state.Open(opts.statePath)
+	if err != nil {
+		return err
+	}
+	defer store.Close()
+	runs, err := store.Runs(ctx, all || filter != "")
+	if err != nil {
+		return err
+	}
+	var paths []string
+	for _, run := range runs {
+		if run.LogPath == "" || !matchesRun(run, filter) || !all && filter == "" && run.Status != state.StatusRunning {
+			continue
+		}
+		paths = append(paths, run.LogPath)
+	}
+	if len(paths) == 0 {
+		fmt.Fprintln(stdout, "no matching review logs")
+		return nil
+	}
+	tailArgs := []string{"-n", strconv.Itoa(tailLines)}
+	if follow {
+		tailArgs = append(tailArgs, "-f")
+	}
+	tailArgs = append(tailArgs, paths...)
+	command := exec.CommandContext(ctx, "tail", tailArgs...)
+	command.Stdout = stdout
+	command.Stderr = stderr
+	if err := command.Run(); err != nil && !errors.Is(ctx.Err(), context.Canceled) {
+		return fmt.Errorf("tail logs: %w", err)
+	}
+	return nil
+}
+
+func matchesRun(run state.Run, filter string) bool {
+	if filter == "" {
+		return true
+	}
+	if strings.Contains(filter, "#") {
+		return filter == fmt.Sprintf("%s#%d", run.Repository, run.Number)
+	}
+	return filter == strconv.Itoa(run.Number)
 }
 
 func daemon(opts options, out io.Writer) error {
@@ -221,6 +396,9 @@ func daemon(opts options, out io.Writer) error {
 	defer pool.Wait()
 	for {
 		started := time.Now()
+		if err := watchRunning(ctx, cfg, store, out); err != nil && !errors.Is(err, context.Canceled) {
+			fmt.Fprintf(out, "%s running review check failed: %v\n", time.Now().Format(time.RFC3339), err)
+		}
 		if err := scanConfigured(ctx, cfg, store, out); err != nil && !errors.Is(err, context.Canceled) {
 			fmt.Fprintf(out, "%s scan failed: %v\n", time.Now().Format(time.RFC3339), err)
 		}
@@ -239,6 +417,38 @@ func daemon(opts options, out io.Writer) error {
 		case <-timer.C:
 		}
 	}
+}
+
+func watchRunning(ctx context.Context, cfg config.Config, store *state.Store, out io.Writer) error {
+	runs, err := store.Runs(ctx, false)
+	if err != nil {
+		return err
+	}
+	client := gh.NewClient(gh.ExecRunner{})
+	configured := make(map[string]struct{}, len(cfg.Repositories))
+	for _, repository := range cfg.Repositories {
+		configured[repository.Name] = struct{}{}
+	}
+	for _, run := range runs {
+		if run.Status != state.StatusRunning {
+			continue
+		}
+		if _, ok := configured[run.Repository]; !ok {
+			continue
+		}
+		pr, err := client.PullRequest(ctx, run.Repository, run.Number)
+		if err != nil {
+			return err
+		}
+		if pr.State == "OPEN" {
+			continue
+		}
+		if _, err := store.RequestStale(ctx, run.Repository, run.Number); err != nil {
+			return err
+		}
+		fmt.Fprintf(out, "stop requested for closed pull request %s#%d run=%d\n", run.Repository, run.Number, run.ID)
+	}
+	return nil
 }
 
 func enqueue(ctx context.Context, opts options, args []string, out io.Writer) error {
@@ -287,7 +497,7 @@ func enqueue(ctx context.Context, opts options, args []string, out io.Writer) er
 		return err
 	}
 	review := repositoryConfig.EffectiveReview(cfg.Review)
-	if gh.HasMarker(pr, review.Marker, pr.HeadSHA, reviewer) && !force {
+	if gh.HasMarker(pr, review.Marker, pr.HeadSHA, pr.BaseSHA, reviewer) && !force {
 		return fmt.Errorf("pull request %s already has a review marker for head %s; use --force to rerun", ref, pr.HeadSHA)
 	}
 	queued, err := store.Enqueue(ctx, state.PullRequest{
@@ -388,9 +598,21 @@ func doctor(opts options, out io.Writer) error {
 	commands := map[string]struct{}{"git": {}, "gh": {}, cfg.Review.Command: {}}
 	for _, repository := range cfg.Repositories {
 		commands[repository.EffectiveReview(cfg.Review).Command] = struct{}{}
+		patch := repository.EffectivePatch(cfg.Patch)
+		if patch.Enabled {
+			commands[patch.Command] = struct{}{}
+		}
 	}
 	if cfg.Notification.Enabled {
-		commands[cfg.Notification.Command] = struct{}{}
+		if cfg.Notification.Command == "auto" {
+			if _, terminalErr := exec.LookPath("terminal-notifier"); terminalErr != nil {
+				if _, scriptErr := exec.LookPath("osascript"); scriptErr != nil {
+					return errors.New("notifications require terminal-notifier or osascript")
+				}
+			}
+		} else {
+			commands[cfg.Notification.Command] = struct{}{}
+		}
 	}
 	for command := range commands {
 		path, err := exec.LookPath(command)
