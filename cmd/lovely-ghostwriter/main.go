@@ -50,7 +50,7 @@ func run(args []string, stdout, stderr io.Writer) error {
 	flags := flag.NewFlagSet("lovely-ghostwriter", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	configPath := flags.String("config", defaultPaths.Config, "path to config.toml")
-	statePath := flags.String("state", "", "path to state.db (defaults beside config)")
+	statePath := flags.String("state", defaultPaths.State, "path to state.db")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -60,9 +60,6 @@ func run(args []string, stdout, stderr io.Writer) error {
 		return nil
 	}
 	opts := options{configPath: *configPath, statePath: *statePath}
-	if opts.statePath == "" {
-		opts.statePath = filepath.Join(filepath.Dir(opts.configPath), "state.db")
-	}
 
 	switch remaining[0] {
 	case "init":
