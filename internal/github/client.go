@@ -35,7 +35,6 @@ type ReviewRequest struct {
 }
 
 type Review struct {
-	ID     int64  `json:"id"`
 	Body   string `json:"body"`
 	Author Actor  `json:"author"`
 }

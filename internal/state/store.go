@@ -264,6 +264,60 @@ WHERE repository = ? AND number = ? AND head_sha = ?
 	return nil
 }
 
+func (s *Store) RecoverInterrupted(ctx context.Context) ([]Run, error) {
+	runs, err := s.runningRuns(ctx)
+	if err != nil || len(runs) == 0 {
+		return runs, err
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("begin interrupted run recovery: %w", err)
+	}
+	defer tx.Rollback()
+	now := time.Now().UTC().Truncate(time.Second).Format(time.RFC3339)
+	for _, run := range runs {
+		if _, err := tx.ExecContext(ctx, `
+UPDATE runs SET status = 'failed', ended_at = ?, error = 'queue consumer stopped before completion'
+WHERE id = ? AND status = 'running'
+`, now, run.ID); err != nil {
+			return nil, fmt.Errorf("recover run %d: %w", run.ID, err)
+		}
+		if _, err := tx.ExecContext(ctx, `
+UPDATE pull_requests SET status = 'queued', updated_at = ?
+WHERE repository = ? AND number = ? AND head_sha = ? AND status = 'running'
+`, now, run.Repository, run.Number, run.HeadSHA); err != nil {
+			return nil, fmt.Errorf("requeue run %d: %w", run.ID, err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("commit interrupted run recovery: %w", err)
+	}
+	return runs, nil
+}
+
+func (s *Store) runningRuns(ctx context.Context) ([]Run, error) {
+	rows, err := s.db.QueryContext(ctx, `
+SELECT id, repository, number, head_sha, attempt, status, started_at,
+       COALESCE(ended_at, ''), log_path, artifact_path, worktree_path, error
+FROM runs WHERE status = 'running' ORDER BY started_at
+`)
+	if err != nil {
+		return nil, fmt.Errorf("list running runs: %w", err)
+	}
+	defer rows.Close()
+	var runs []Run
+	for rows.Next() {
+		var run Run
+		var startedAt, endedAt string
+		if err := rows.Scan(&run.ID, &run.Repository, &run.Number, &run.HeadSHA, &run.Attempt, &run.Status, &startedAt, &endedAt, &run.LogPath, &run.ArtifactPath, &run.WorktreePath, &run.Error); err != nil {
+			return nil, fmt.Errorf("scan running run: %w", err)
+		}
+		run.StartedAt, _ = time.Parse(time.RFC3339, startedAt)
+		runs = append(runs, run)
+	}
+	return runs, rows.Err()
+}
+
 func (s *Store) Enqueue(ctx context.Context, pr PullRequest, force bool) (bool, error) {
 	created, err := s.UpsertPullRequest(ctx, pr)
 	if err != nil || created {
@@ -307,7 +361,7 @@ SET title = ?, url = ?, author = ?, base_branch = ?,
       WHEN manual = 0 AND base_sha <> ? AND status IN ('canceled', 'failed', 'completed', 'reviewed') THEN ?
       ELSE status
     END,
-    base_sha = ?,
+    base_sha = CASE WHEN status = 'running' THEN base_sha ELSE ? END,
     manual = CASE WHEN ? THEN 1 ELSE manual END, updated_at = ?
 WHERE repository = ? AND number = ? AND head_sha = ?
 `, pr.Title, pr.URL, pr.Author, pr.BaseBranch, pr.BaseSHA, pr.Status, pr.BaseSHA, pr.Manual, now.Format(time.RFC3339), pr.Repository, pr.Number, pr.HeadSHA); err != nil {

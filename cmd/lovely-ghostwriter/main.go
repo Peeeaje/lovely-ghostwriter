@@ -18,6 +18,7 @@ import (
 
 	"github.com/Peeeaje/lovely-ghostwriter/internal/config"
 	gh "github.com/Peeeaje/lovely-ghostwriter/internal/github"
+	"github.com/Peeeaje/lovely-ghostwriter/internal/lock"
 	"github.com/Peeeaje/lovely-ghostwriter/internal/paths"
 	"github.com/Peeeaje/lovely-ghostwriter/internal/reviewer"
 	"github.com/Peeeaje/lovely-ghostwriter/internal/scanner"
@@ -206,11 +207,19 @@ func daemon(opts options, out io.Writer) error {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	consumerLock, err := lock.Acquire(opts.statePath + ".lock")
+	if err != nil {
+		return err
+	}
+	defer consumerLock.Close()
 	store, err := state.Open(opts.statePath)
 	if err != nil {
 		return err
 	}
 	defer store.Close()
+	if err := recoverInterrupted(ctx, cfg, store, opts, out); err != nil {
+		return err
+	}
 	pool := reviewPool(cfg, store, opts, out)
 	defer pool.Wait()
 	for {
@@ -318,12 +327,45 @@ func parsePullRequestRef(ref string) (string, int, error) {
 }
 
 func runQueue(ctx context.Context, opts options, out io.Writer) error {
+	consumerLock, err := lock.Acquire(opts.statePath + ".lock")
+	if err != nil {
+		return err
+	}
+	defer consumerLock.Close()
 	cfg, store, err := openConfiguredStore(opts)
 	if err != nil {
 		return err
 	}
 	defer store.Close()
+	if err := recoverInterrupted(ctx, cfg, store, opts, out); err != nil {
+		return err
+	}
 	return reviewPool(cfg, store, opts, out).Drain(ctx)
+}
+
+func recoverInterrupted(ctx context.Context, cfg config.Config, store *state.Store, opts options, out io.Writer) error {
+	runs, err := store.RecoverInterrupted(ctx)
+	if err != nil {
+		return err
+	}
+	manager := worktree.Manager{Root: filepath.Join(filepath.Dir(opts.statePath), "worktrees")}
+	for _, run := range runs {
+		for _, repository := range cfg.Repositories {
+			if repository.Name != run.Repository {
+				continue
+			}
+			sourcePath, err := repository.ExpandedPath()
+			if err != nil {
+				return err
+			}
+			if err := manager.Cleanup(context.Background(), sourcePath, run.WorktreePath, run.ID); err != nil {
+				fmt.Fprintf(out, "failed to clean interrupted run=%d: %v\n", run.ID, err)
+			}
+			fmt.Fprintf(out, "requeued interrupted %s#%d run=%d\n", run.Repository, run.Number, run.ID)
+			break
+		}
+	}
+	return nil
 }
 
 func reviewPool(cfg config.Config, store *state.Store, opts options, out io.Writer) *reviewer.Pool {

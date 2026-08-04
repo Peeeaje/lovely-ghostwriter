@@ -74,16 +74,18 @@ func (m Manager) Prepare(ctx context.Context, sourcePath, repository string, num
 }
 
 func (m Manager) Cleanup(ctx context.Context, sourcePath, path string, runID int64) error {
-	if path == "" {
-		return nil
-	}
-	if output, err := command(ctx, sourcePath, "worktree", "remove", "--force", path); err != nil {
-		return fmt.Errorf("remove worktree: %s: %w", output, err)
+	var cleanupErr error
+	if path != "" {
+		if _, err := os.Stat(path); err == nil {
+			if output, err := command(ctx, sourcePath, "worktree", "remove", "--force", path); err != nil {
+				cleanupErr = fmt.Errorf("remove worktree: %s: %w", output, err)
+			}
+		}
 	}
 	_, _ = command(ctx, sourcePath, "worktree", "prune")
 	refRoot := fmt.Sprintf("refs/lovely-ghostwriter/run-%d", runID)
 	m.deleteRefs(ctx, sourcePath, refRoot+"/base", refRoot+"/head")
-	return nil
+	return cleanupErr
 }
 
 func (m Manager) deleteRefs(ctx context.Context, sourcePath string, refs ...string) {

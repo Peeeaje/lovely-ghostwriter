@@ -26,7 +26,6 @@ func Prompt(cfg config.Config, pr state.PullRequest, worktreePath, artifactPath 
 
 Codexのproject rootは信頼済みartifact directoryです。レビュー対象は上記の専用detached worktreeだけです。
 git commandは必ずgit -C <dedicated worktree>の形で実行し、base SHA...target head SHAを比較してください。
-利用可能ならrepositoryのreview skillとAGENTS.mdに従ってください。
 artifact directoryのpr-context.jsonにある既存reviewsと、base SHA...target head SHAのdiff、関連コード、testsを確認してください。
 既に指摘済みの内容を重複させないでください。
 コードスタイルの好みではなく、実害のあるbug、regression、security、data integrity、重要なtest不足を優先してください。
