@@ -1,0 +1,7 @@
+/bin/
+/dist/
+/.direnv/
+*.db
+*.db-shm
+*.db-wal
+*.log
