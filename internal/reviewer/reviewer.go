@@ -43,6 +43,9 @@ func (r *Runner) EligibleAutomatic(ctx context.Context, repository config.Reposi
 	if current.HeadSHA != target.HeadSHA || current.BaseSHA != target.BaseSHA {
 		return false, nil
 	}
+	if !repository.AutoReviewBase(current.BaseBranch) {
+		return false, nil
+	}
 	return policy.Automatic(repository, current, r.Config.Review.Marker, reviewer), nil
 }
 
@@ -177,6 +180,9 @@ func currentTarget(current gh.PullRequest, target state.PullRequest) error {
 	}
 	if current.BaseSHA != target.BaseSHA {
 		return fmt.Errorf("pull request base changed from %s to %s", target.BaseSHA, current.BaseSHA)
+	}
+	if current.BaseBranch != target.BaseBranch {
+		return fmt.Errorf("pull request base branch changed from %s to %s", target.BaseBranch, current.BaseBranch)
 	}
 	return nil
 }

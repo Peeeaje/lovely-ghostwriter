@@ -114,6 +114,30 @@ func TestEnqueuePromotesDetectedWithoutForce(t *testing.T) {
 	}
 }
 
+func TestFailedEnqueueDoesNotMakeAutomaticQueueManual(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	pr := PullRequest{
+		Repository: "owner/repository", Number: 42, HeadSHA: "head", Title: "Change",
+		URL: "https://github.com/owner/repository/pull/42", Author: "alice",
+		BaseBranch: "main", BaseSHA: "base", Status: StatusQueued,
+	}
+	if _, err := store.UpsertPullRequest(context.Background(), pr); err != nil {
+		t.Fatal(err)
+	}
+	pr.Manual = true
+	if queued, err := store.Enqueue(context.Background(), pr, false); err != nil || queued {
+		t.Fatalf("Enqueue() queued=%v err=%v", queued, err)
+	}
+	claimed, _, ok, err := store.ClaimNext(context.Background())
+	if err != nil || !ok || claimed.Manual {
+		t.Fatalf("ClaimNext() pr=%+v ok=%v err=%v", claimed, ok, err)
+	}
+}
+
 func TestUpsertRequeuesAutomaticPullRequestWhenBaseChanges(t *testing.T) {
 	store, err := Open(filepath.Join(t.TempDir(), "state.db"))
 	if err != nil {

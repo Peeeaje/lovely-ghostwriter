@@ -329,7 +329,7 @@ func (s *Store) Enqueue(ctx context.Context, pr PullRequest, force bool) (bool, 
 	}
 	now := time.Now().UTC().Truncate(time.Second).Format(time.RFC3339)
 	result, err := s.db.ExecContext(ctx, `
-UPDATE pull_requests SET status = 'queued', updated_at = ?
+UPDATE pull_requests SET status = 'queued', manual = 1, updated_at = ?
 WHERE repository = ? AND number = ? AND head_sha = ? AND `+predicate,
 		now, pr.Repository, pr.Number, pr.HeadSHA)
 	if err != nil {
@@ -362,9 +362,9 @@ SET title = ?, url = ?, author = ?, base_branch = ?,
       ELSE status
     END,
     base_sha = CASE WHEN status = 'running' THEN base_sha ELSE ? END,
-    manual = CASE WHEN ? THEN 1 ELSE manual END, updated_at = ?
+    updated_at = ?
 WHERE repository = ? AND number = ? AND head_sha = ?
-`, pr.Title, pr.URL, pr.Author, pr.BaseBranch, pr.BaseSHA, pr.Status, pr.BaseSHA, pr.Manual, now.Format(time.RFC3339), pr.Repository, pr.Number, pr.HeadSHA); err != nil {
+`, pr.Title, pr.URL, pr.Author, pr.BaseBranch, pr.BaseSHA, pr.Status, pr.BaseSHA, now.Format(time.RFC3339), pr.Repository, pr.Number, pr.HeadSHA); err != nil {
 			return false, fmt.Errorf("update pull request %s#%d: %w", pr.Repository, pr.Number, err)
 		}
 	}

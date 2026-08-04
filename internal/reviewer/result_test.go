@@ -1,12 +1,26 @@
 package reviewer
 
 import (
+	"context"
 	"strings"
 	"testing"
 
+	"github.com/Peeeaje/lovely-ghostwriter/internal/config"
 	gh "github.com/Peeeaje/lovely-ghostwriter/internal/github"
 	"github.com/Peeeaje/lovely-ghostwriter/internal/state"
 )
+
+type fakeGitHub struct {
+	pr gh.PullRequest
+}
+
+func (f fakeGitHub) CurrentUser(context.Context) (string, error) { return "reviewer", nil }
+func (f fakeGitHub) PullRequest(context.Context, string, int) (gh.PullRequest, error) {
+	return f.pr, nil
+}
+func (f fakeGitHub) SubmitReview(context.Context, string, int, gh.ReviewSubmission) (gh.Review, error) {
+	return gh.Review{}, nil
+}
 
 func TestReadResultAndSubmission(t *testing.T) {
 	result, err := readResult([]byte(`{
@@ -31,11 +45,24 @@ func TestReadResultAndSubmission(t *testing.T) {
 }
 
 func TestCurrentTarget(t *testing.T) {
-	target := state.PullRequest{HeadSHA: "head", BaseSHA: "base"}
-	if err := currentTarget(gh.PullRequest{State: "OPEN", HeadSHA: "head", BaseSHA: "base"}, target); err != nil {
+	target := state.PullRequest{HeadSHA: "head", BaseSHA: "base", BaseBranch: "main"}
+	if err := currentTarget(gh.PullRequest{State: "OPEN", HeadSHA: "head", BaseSHA: "base", BaseBranch: "main"}, target); err != nil {
 		t.Fatal(err)
 	}
-	if err := currentTarget(gh.PullRequest{State: "OPEN", HeadSHA: "new-head", BaseSHA: "base"}, target); err == nil {
+	if err := currentTarget(gh.PullRequest{State: "OPEN", HeadSHA: "new-head", BaseSHA: "base", BaseBranch: "main"}, target); err == nil {
 		t.Fatal("currentTarget() accepted a changed head")
+	}
+}
+
+func TestEligibleAutomaticRejectsRetargetedBaseBranch(t *testing.T) {
+	cfg := config.Default()
+	runner := Runner{Config: cfg, GitHub: fakeGitHub{pr: gh.PullRequest{
+		State: "OPEN", HeadSHA: "head", BaseSHA: "base", BaseBranch: "release",
+		ReviewRequests: []gh.ReviewRequest{{Login: "reviewer"}},
+	}}}
+	target := state.PullRequest{Repository: "owner/repository", Number: 1, HeadSHA: "head", BaseSHA: "base", BaseBranch: "main"}
+	eligible, err := runner.EligibleAutomatic(context.Background(), cfg.Repositories[0], target)
+	if err != nil || eligible {
+		t.Fatalf("EligibleAutomatic() eligible=%v err=%v", eligible, err)
 	}
 }
