@@ -10,18 +10,19 @@ import (
 )
 
 type PullRequest struct {
-	Number         int             `json:"number"`
-	Title          string          `json:"title"`
-	URL            string          `json:"url"`
-	HeadSHA        string          `json:"headRefOid"`
-	HeadBranch     string          `json:"headRefName"`
-	BaseBranch     string          `json:"baseRefName"`
-	BaseSHA        string          `json:"baseRefOid"`
-	Draft          bool            `json:"isDraft"`
-	State          string          `json:"state"`
-	Author         Actor           `json:"author"`
-	ReviewRequests []ReviewRequest `json:"reviewRequests"`
-	Reviews        []Review        `json:"reviews"`
+	Number            int             `json:"number"`
+	Title             string          `json:"title"`
+	URL               string          `json:"url"`
+	HeadSHA           string          `json:"headRefOid"`
+	HeadBranch        string          `json:"headRefName"`
+	BaseBranch        string          `json:"baseRefName"`
+	BaseSHA           string          `json:"baseRefOid"`
+	Draft             bool            `json:"isDraft"`
+	State             string          `json:"state"`
+	IsCrossRepository bool            `json:"isCrossRepository"`
+	Author            Actor           `json:"author"`
+	ReviewRequests    []ReviewRequest `json:"reviewRequests"`
+	Reviews           []Review        `json:"reviews"`
 }
 
 type Actor struct {
@@ -98,7 +99,7 @@ func (c *Client) OpenPullRequests(ctx context.Context, repository string) ([]Pul
 		"--repo", repository,
 		"--state", "open",
 		"--limit", "100",
-		"--json", "number,title,url,headRefOid,headRefName,baseRefName,baseRefOid,isDraft,state,author,reviewRequests,reviews",
+		"--json", "number,title,url,headRefOid,headRefName,baseRefName,baseRefOid,isDraft,state,isCrossRepository,author,reviewRequests,reviews",
 	)
 	if err != nil {
 		return nil, fmt.Errorf("list pull requests for %s: %w", repository, err)
@@ -122,7 +123,7 @@ func (c *Client) CurrentUser(ctx context.Context) (string, error) {
 func (c *Client) PullRequest(ctx context.Context, repository string, number int) (PullRequest, error) {
 	output, err := c.runner.Output(ctx, "gh", "pr", "view", strconv.Itoa(number),
 		"--repo", repository,
-		"--json", "number,title,url,headRefOid,headRefName,baseRefName,baseRefOid,isDraft,state,author,reviewRequests,reviews",
+		"--json", "number,title,url,headRefOid,headRefName,baseRefName,baseRefOid,isDraft,state,isCrossRepository,author,reviewRequests,reviews",
 	)
 	if err != nil {
 		return PullRequest{}, fmt.Errorf("view pull request %s#%d: %w", repository, number, err)
@@ -135,23 +136,25 @@ func (c *Client) PullRequest(ctx context.Context, repository string, number int)
 	return pr, nil
 }
 
-func HasMarker(pr PullRequest, marker, headSHA, reviewer string) bool {
+func HasMarker(pr PullRequest, marker, headSHA, baseSHA, reviewer string) bool {
 	markerPrefix := "<!-- " + marker + " "
-	headAttribute := "head=" + headSHA
+	headAttribute := "head=" + headSHA + " "
+	baseAttribute := "base=" + baseSHA + " "
 	for _, review := range pr.Reviews {
-		if review.Author.Login == reviewer && strings.Contains(review.Body, markerPrefix) && strings.Contains(review.Body, headAttribute) {
+		if review.Author.Login == reviewer && strings.Contains(review.Body, markerPrefix) && strings.Contains(review.Body, headAttribute) && strings.Contains(review.Body, baseAttribute) {
 			return true
 		}
 	}
 	return false
 }
 
-func HasRunMarker(pr PullRequest, marker, headSHA, reviewer string, runID int64) bool {
+func HasRunMarker(pr PullRequest, marker, headSHA, baseSHA, reviewer string, runID int64) bool {
 	markerPrefix := "<!-- " + marker + " "
-	headAttribute := "head=" + headSHA
-	runAttribute := "run=" + strconv.FormatInt(runID, 10)
+	headAttribute := "head=" + headSHA + " "
+	baseAttribute := "base=" + baseSHA + " "
+	runAttribute := "run=" + strconv.FormatInt(runID, 10) + " "
 	for _, review := range pr.Reviews {
-		if review.Author.Login == reviewer && strings.Contains(review.Body, markerPrefix) && strings.Contains(review.Body, headAttribute) && strings.Contains(review.Body, runAttribute) {
+		if review.Author.Login == reviewer && strings.Contains(review.Body, markerPrefix) && strings.Contains(review.Body, headAttribute) && strings.Contains(review.Body, baseAttribute) && strings.Contains(review.Body, runAttribute) {
 			return true
 		}
 	}

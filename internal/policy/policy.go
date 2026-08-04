@@ -11,7 +11,7 @@ func Candidate(repository config.RepositoryConfig, pr gh.PullRequest, marker, re
 	if pr.State != "OPEN" || (pr.Draft && !repository.IncludeDrafts) {
 		return false
 	}
-	if gh.HasMarker(pr, marker, pr.HeadSHA, reviewer) || slices.Contains(repository.ExcludeAuthors, pr.Author.Login) {
+	if gh.HasMarker(pr, marker, pr.HeadSHA, pr.BaseSHA, reviewer) || slices.Contains(repository.ExcludeAuthors, pr.Author.Login) {
 		return false
 	}
 	if len(repository.Authors) > 0 && !slices.Contains(repository.Authors, pr.Author.Login) {

@@ -12,10 +12,15 @@ The project is under active development. The current implementation can:
 - create an isolated Git worktree for each review
 - run Codex in dry-run or GitHub posting mode
 - verify a hidden review marker before recording a posted review as successful
+- recheck a pull request when its head changes during a long review
+- optionally turn patchable blocking findings into one patch pull request
+- cancel or reject queued and running reviews
+- retain review logs, artifacts, and stale-run evidence
+- send clickable review and detection notifications
 - run continuously as a daemon
 - install itself as a macOS LaunchAgent
 
-The review worker is intentionally review-only. It does not edit the original pull request branch or create patch pull requests yet.
+The original pull request branch is never edited. Optional patch mode edits only an isolated worktree and pushes a separate patch branch after revalidation.
 
 ## Requirements
 
@@ -69,14 +74,28 @@ marker = "codex-auto-review"
 post_reviews = false # change to true after validating a dry-run
 extra_args = []
 instructions = ""
+max_head_rechecks = 3
+
+[patch]
+enabled = false
+command = "codex"
+model = "gpt-5.6-sol"
+reasoning_effort = "xhigh"
+sandbox = "workspace-write"
+max_iterations = 2
+branch_prefix = "develop/codex-auto-fix"
+title_prefix = "[codex-auto-fix]"
+extra_args = []
+instructions = ""
 
 [notification]
 enabled = false
-command = "terminal-notifier"
+command = "auto"
 timeout = "5s"
 started = true
 finished = true
 failed = true
+detected = true
 
 [[repository]]
 name = "owner/repository"
@@ -107,9 +126,15 @@ model = "gpt-5.6-sol"
 reasoning_effort = "high"
 post_reviews = true
 instructions = "Prioritize API compatibility."
+
+[repository.patch]
+enabled = true
+instructions = "Run the repository's required checks and clean up resources started by the review."
 ```
 
-On macOS, notifications use `terminal-notifier`. Started, finished, and failed notifications include the pull request title and open its URL when clicked. `notification.timeout` prevents a broken notifier from blocking review workers.
+Patch mode asks Codex to orchestrate review, patchable blocking fixes, and re-review in the dedicated worktree. The host process checks the current head before creating one patch pull request. Cross-repository pull requests remain review-only.
+
+On macOS, `notification.command = "auto"` prefers `terminal-notifier` and falls back to `osascript`. Started, finished, and failed notifications include the pull request title. A newly detected pull request outside `base_branches` also sends one notification; a single-item notification opens the pull request when clicked. `notification.timeout` prevents a broken notifier from blocking review workers.
 
 Validate the local environment before starting the daemon:
 
@@ -126,8 +151,18 @@ lovely-ghostwriter scan
 # Inspect current state
 lovely-ghostwriter status
 
+# Include completed, stale, and rejected history
+lovely-ghostwriter status --all
+
 # Manually queue any open pull request, including a draft
 lovely-ghostwriter enqueue owner/repository#123
+
+# Stop and locally reject the current head
+lovely-ghostwriter cancel owner/repository#123
+
+# Read or follow review logs
+lovely-ghostwriter logs owner/repository#123 --tail 200
+lovely-ghostwriter logs --follow
 
 # Run the current queue in the foreground
 lovely-ghostwriter run-queue
@@ -173,15 +208,12 @@ Runtime state and logs are stored separately from configuration:
 
 `XDG_CONFIG_HOME` and `XDG_STATE_HOME` override these base directories.
 
-SQLite uses WAL mode and treats `(repository, pull request number, head SHA)` as the identity of a detected revision. This keeps repeated scans idempotent and avoids shared-file update races between review workers.
+SQLite uses WAL mode and treats `(repository, pull request number, head SHA)` as the identity of a detected revision. Only one head of a pull request runs at a time. If the head advances, the existing run keeps its artifacts, retargets to the current head, and rechecks before posting. A closed or merged pull request is stopped and recorded as stale.
 
 ## Roadmap
 
-1. Patch pull request orchestration for blocking findings
-2. Queue retry, cancel, and crash recovery
-3. Clickable desktop notifications
-4. Homebrew distribution
-5. Optional macOS menu bar UI
+1. GitHub Releases and Homebrew distribution
+2. Optional macOS menu bar UI
 
 ## License
 

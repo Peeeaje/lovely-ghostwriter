@@ -20,7 +20,7 @@ func TestNotifyStartedIncludesPullRequestURL(t *testing.T) {
 		t.Fatal(err)
 	}
 	runner := Runner{Config: config.Config{Notification: config.NotificationConfig{
-		Enabled: true, Command: command, Timeout: "1s", Started: true,
+		Enabled: true, Command: command, Timeout: "5s", Started: true,
 	}}}
 	pr := state.PullRequest{Repository: "owner/repository", Number: 42, Title: "Change", URL: "https://example.test/pull/42"}
 	if err := runner.NotifyStarted(context.Background(), pr); err != nil {
@@ -49,5 +49,27 @@ func TestNotifyStartedTimesOut(t *testing.T) {
 	}
 	if time.Since(started) > time.Second {
 		t.Fatal("NotifyStarted() did not honor its timeout")
+	}
+}
+
+func TestNotifyDetectedIncludesPullRequestAndURL(t *testing.T) {
+	output := filepath.Join(t.TempDir(), "args")
+	command := filepath.Join(t.TempDir(), "notifier")
+	script := "#!/bin/sh\nprintf '%s\\n' \"$@\" > " + output + "\n"
+	if err := os.WriteFile(command, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Default()
+	cfg.Notification = config.NotificationConfig{Enabled: true, Command: command, Timeout: "5s", Detected: true}
+	pr := state.PullRequest{Repository: "owner/repository", Number: 42, Title: "Change", URL: "https://example.test/pull/42"}
+	if err := NotifyDetected(context.Background(), cfg, []state.PullRequest{pr}); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(output)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), pr.URL) || !strings.Contains(string(data), "owner/repository#42 Change") {
+		t.Fatalf("notification args = %s", data)
 	}
 }

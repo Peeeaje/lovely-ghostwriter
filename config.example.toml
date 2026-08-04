@@ -11,14 +11,28 @@ marker = "codex-auto-review"
 post_reviews = false
 extra_args = []
 instructions = ""
+max_head_rechecks = 3
+
+[patch]
+enabled = false
+command = "codex"
+model = "gpt-5.6-sol"
+reasoning_effort = "xhigh"
+sandbox = "workspace-write"
+max_iterations = 2
+branch_prefix = "develop/codex-auto-fix"
+title_prefix = "[codex-auto-fix]"
+extra_args = []
+instructions = ""
 
 [notification]
 enabled = false
-command = "terminal-notifier"
+command = "auto"
 timeout = "5s"
 started = true
 finished = true
 failed = true
+detected = true
 
 [[repository]]
 name = "owner/repository"
@@ -37,3 +51,7 @@ update_trigger = "review-request"
 # model = "gpt-5.6-sol"
 # reasoning_effort = "high"
 # instructions = "Prioritize API compatibility."
+
+# [repository.patch]
+# enabled = true
+# instructions = "Run repository checks and clean up resources started by the review."

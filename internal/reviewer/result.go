@@ -71,7 +71,7 @@ func readResult(data []byte) (Result, error) {
 	return result, nil
 }
 
-func submission(result Result, marker, reviewer string, pr state.PullRequest, runID int64) gh.ReviewSubmission {
+func submission(result Result, marker, reviewer string, pr state.PullRequest, runID int64, patchURL string) gh.ReviewSubmission {
 	counts := map[string]int{"blocking": 0, "caution": 0, "nit": 0}
 	var comments []gh.ReviewComment
 	var summaryFindings []string
@@ -90,7 +90,10 @@ func submission(result Result, marker, reviewer string, pr state.PullRequest, ru
 	if len(summaryFindings) > 0 {
 		body += "\n\n" + strings.Join(summaryFindings, "\n")
 	}
-	body += fmt.Sprintf("\n\n---\n_このレビューはCodexによる自動生成です。最終判断は人間のreviewerが行ってください。_\n<!-- %s reviewer=%s head=%s run=%d -->",
-		marker, reviewer, pr.HeadSHA, runID)
+	if patchURL != "" {
+		body += "\n\nBlocking findings addressed by patch PR: " + patchURL
+	}
+	body += fmt.Sprintf("\n\n---\n_このレビューはCodexによる自動生成です。最終判断は人間のreviewerが行ってください。_\n<!-- %s reviewer=%s head=%s base=%s run=%d -->",
+		marker, reviewer, pr.HeadSHA, pr.BaseSHA, runID)
 	return gh.ReviewSubmission{CommitID: pr.HeadSHA, Event: "COMMENT", Body: body, Comments: comments}
 }

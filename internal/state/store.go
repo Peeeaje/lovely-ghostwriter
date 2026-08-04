@@ -22,22 +22,25 @@ const (
 	StatusCompleted Status = "completed"
 	StatusFailed    Status = "failed"
 	StatusCanceled  Status = "canceled"
+	StatusStale     Status = "stale"
+	StatusRejected  Status = "rejected"
 )
 
 type PullRequest struct {
-	Repository    string
-	Number        int
-	HeadSHA       string
-	Title         string
-	URL           string
-	Author        string
-	BaseBranch    string
-	BaseSHA       string
-	Manual        bool
-	RecoveryRunID int64
-	Status        Status
-	DetectedAt    time.Time
-	UpdatedAt     time.Time
+	Repository      string
+	Number          int
+	HeadSHA         string
+	Title           string
+	URL             string
+	Author          string
+	BaseBranch      string
+	BaseSHA         string
+	Manual          bool
+	RecoveryRunID   int64
+	CancelRequested bool
+	Status          Status
+	DetectedAt      time.Time
+	UpdatedAt       time.Time
 }
 
 type Store struct {
@@ -57,6 +60,19 @@ type Run struct {
 	ArtifactPath string
 	WorktreePath string
 	Error        string
+}
+
+type ArtifactHandoff struct {
+	HeadSHA string
+	Path    string
+}
+
+type StopRequestedError struct {
+	Status Status
+}
+
+func (e StopRequestedError) Error() string {
+	return fmt.Sprintf("pull request stop requested with status %s", e.Status)
 }
 
 func Open(path string) (*Store, error) {
@@ -97,6 +113,8 @@ CREATE TABLE IF NOT EXISTS pull_requests (
   base_sha TEXT NOT NULL DEFAULT '',
   manual INTEGER NOT NULL DEFAULT 0,
   recovery_run_id INTEGER NOT NULL DEFAULT 0,
+  cancel_requested INTEGER NOT NULL DEFAULT 0,
+  cancel_status TEXT NOT NULL DEFAULT 'rejected',
   status TEXT NOT NULL,
   detected_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
@@ -105,6 +123,15 @@ CREATE TABLE IF NOT EXISTS pull_requests (
 
 CREATE INDEX IF NOT EXISTS pull_requests_status_idx
   ON pull_requests(status, updated_at DESC);
+
+CREATE TABLE IF NOT EXISTS pull_request_revisions (
+  repository TEXT NOT NULL,
+  number INTEGER NOT NULL,
+  head_sha TEXT NOT NULL,
+  base_sha TEXT NOT NULL,
+  detected_at TEXT NOT NULL,
+  PRIMARY KEY (repository, number, head_sha, base_sha)
+);
 
 CREATE TABLE IF NOT EXISTS runs (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -135,6 +162,18 @@ CREATE INDEX IF NOT EXISTS runs_status_idx ON runs(status, started_at DESC);
 	}
 	if err := s.ensureColumn(ctx, "pull_requests", "recovery_run_id", "INTEGER NOT NULL DEFAULT 0"); err != nil {
 		return err
+	}
+	if err := s.ensureColumn(ctx, "pull_requests", "cancel_requested", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+	if err := s.ensureColumn(ctx, "pull_requests", "cancel_status", "TEXT NOT NULL DEFAULT 'rejected'"); err != nil {
+		return err
+	}
+	if _, err := s.db.ExecContext(ctx, `
+INSERT OR IGNORE INTO pull_request_revisions (repository, number, head_sha, base_sha, detected_at)
+SELECT repository, number, head_sha, base_sha, detected_at FROM pull_requests
+`); err != nil {
+		return fmt.Errorf("backfill pull request revisions: %w", err)
 	}
 	return nil
 }
@@ -178,8 +217,14 @@ func (s *Store) ClaimNext(ctx context.Context) (PullRequest, Run, bool, error) {
 	var detectedAt, updatedAt string
 	err = tx.QueryRowContext(ctx, `
 SELECT repository, number, head_sha, title, url, author, base_branch, base_sha, manual, recovery_run_id, status, detected_at, updated_at
-FROM pull_requests
+FROM pull_requests queued
 WHERE status = 'queued'
+  AND NOT EXISTS (
+    SELECT 1 FROM pull_requests running
+    WHERE running.repository = queued.repository
+      AND running.number = queued.number
+      AND running.status = 'running'
+  )
 ORDER BY detected_at, repository, number
 LIMIT 1
 `).Scan(&pr.Repository, &pr.Number, &pr.HeadSHA, &pr.Title, &pr.URL, &pr.Author, &pr.BaseBranch, &pr.BaseSHA, &pr.Manual, &pr.RecoveryRunID, &pr.Status, &detectedAt, &updatedAt)
@@ -192,7 +237,7 @@ LIMIT 1
 
 	now := time.Now().UTC().Truncate(time.Second)
 	result, err := tx.ExecContext(ctx, `
-UPDATE pull_requests SET status = 'running', recovery_run_id = 0, updated_at = ?
+UPDATE pull_requests SET status = 'running', recovery_run_id = 0, cancel_requested = 0, cancel_status = 'rejected', updated_at = ?
 WHERE repository = ? AND number = ? AND head_sha = ? AND status = 'queued'
 `, now.Format(time.RFC3339), pr.Repository, pr.Number, pr.HeadSHA)
 	if err != nil {
@@ -251,12 +296,151 @@ UPDATE runs SET log_path = ?, artifact_path = ?, worktree_path = ? WHERE id = ?
 	return nil
 }
 
-func (s *Store) FinishRun(ctx context.Context, run Run, status Status, runError error) error {
+func (s *Store) RetargetRun(ctx context.Context, run *Run, previous, current PullRequest) (bool, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return fmt.Errorf("begin run finish: %w", err)
+		return false, fmt.Errorf("begin run retarget: %w", err)
 	}
 	defer tx.Rollback()
+	var canceled bool
+	var cancelStatus Status
+	if err := tx.QueryRowContext(ctx, `
+SELECT cancel_requested, cancel_status FROM pull_requests
+WHERE repository = ? AND number = ? AND head_sha = ?
+	`, previous.Repository, previous.Number, previous.HeadSHA).Scan(&canceled, &cancelStatus); err != nil {
+		return false, fmt.Errorf("read previous head before retarget: %w", err)
+	}
+	if canceled {
+		return false, StopRequestedError{Status: cancelStatus}
+	}
+	var currentStatus Status
+	var currentManual bool
+	err = tx.QueryRowContext(ctx, `
+SELECT status, manual FROM pull_requests
+WHERE repository = ? AND number = ? AND head_sha = ?
+`, current.Repository, current.Number, current.HeadSHA).Scan(&currentStatus, &currentManual)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return false, fmt.Errorf("read current head before retarget: %w", err)
+	}
+	if currentStatus == StatusRejected || currentStatus == StatusCanceled {
+		return false, StopRequestedError{Status: currentStatus}
+	}
+	effectiveManual := previous.Manual || current.Manual || currentManual
+	now := time.Now().UTC().Truncate(time.Second).Format(time.RFC3339)
+	if _, err := tx.ExecContext(ctx, `
+UPDATE pull_requests SET status = 'stale', updated_at = ?
+WHERE repository = ? AND number = ? AND head_sha = ? AND status = 'running'
+	`, now, previous.Repository, previous.Number, previous.HeadSHA); err != nil {
+		return false, fmt.Errorf("mark previous head stale: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `
+INSERT OR IGNORE INTO pull_request_revisions (repository, number, head_sha, base_sha, detected_at)
+VALUES (?, ?, ?, ?, ?)
+`, current.Repository, current.Number, current.HeadSHA, current.BaseSHA, now); err != nil {
+		return false, fmt.Errorf("record current revision: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `
+INSERT INTO pull_requests (
+  repository, number, head_sha, title, url, author, base_branch, base_sha,
+  manual, recovery_run_id, cancel_requested, status, detected_at, updated_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 'running', ?, ?)
+ON CONFLICT(repository, number, head_sha) DO UPDATE SET
+  title = excluded.title,
+  url = excluded.url,
+  author = excluded.author,
+  base_branch = excluded.base_branch,
+  base_sha = excluded.base_sha,
+  manual = excluded.manual,
+  recovery_run_id = 0,
+  cancel_requested = 0,
+  status = 'running',
+  updated_at = excluded.updated_at
+`, current.Repository, current.Number, current.HeadSHA, current.Title, current.URL, current.Author,
+		current.BaseBranch, current.BaseSHA, effectiveManual, now, now); err != nil {
+		return false, fmt.Errorf("activate current head: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `
+UPDATE runs SET
+  head_sha = ?,
+  attempt = (
+    SELECT COALESCE(MAX(other.attempt), 0) + 1 FROM runs other
+    WHERE other.repository = runs.repository
+      AND other.number = runs.number
+      AND other.head_sha = ?
+      AND other.id <> runs.id
+  )
+WHERE id = ? AND status = 'running'
+	`, current.HeadSHA, current.HeadSHA, run.ID); err != nil {
+		return false, fmt.Errorf("retarget run: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return false, fmt.Errorf("commit run retarget: %w", err)
+	}
+	run.HeadSHA = current.HeadSHA
+	return effectiveManual, nil
+}
+
+func (s *Store) RequestCancel(ctx context.Context, repository string, number int) (int64, error) {
+	return s.requestStop(ctx, repository, number, StatusRejected)
+}
+
+func (s *Store) RequestStale(ctx context.Context, repository string, number int) (int64, error) {
+	return s.requestStop(ctx, repository, number, StatusStale)
+}
+
+func (s *Store) requestStop(ctx context.Context, repository string, number int, status Status) (int64, error) {
+	result, err := s.db.ExecContext(ctx, `
+UPDATE pull_requests
+SET cancel_requested = CASE WHEN status = 'running' THEN 1 ELSE cancel_requested END,
+    cancel_status = CASE WHEN status = 'running' THEN ? ELSE cancel_status END,
+    status = CASE WHEN status = 'running' THEN status ELSE ? END,
+    updated_at = ?
+WHERE repository = ? AND number = ? AND status IN ('detected', 'queued', 'running', 'failed')
+`, status, status, time.Now().UTC().Truncate(time.Second).Format(time.RFC3339), repository, number)
+	if err != nil {
+		return 0, fmt.Errorf("cancel pull request: %w", err)
+	}
+	return result.RowsAffected()
+}
+
+func (s *Store) CancellationRequested(ctx context.Context, repository string, number int, headSHA string) (Status, bool, error) {
+	var requested bool
+	var status Status
+	err := s.db.QueryRowContext(ctx, `
+SELECT cancel_requested, cancel_status FROM pull_requests
+WHERE repository = ? AND number = ? AND head_sha = ?
+`, repository, number, headSHA).Scan(&requested, &status)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, fmt.Errorf("read cancellation request: %w", err)
+	}
+	return status, requested, nil
+}
+
+func (s *Store) FinishRun(ctx context.Context, run Run, status Status, runError error) error {
+	_, err := s.FinishRunStatus(ctx, run, status, runError)
+	return err
+}
+
+func (s *Store) FinishRunStatus(ctx context.Context, run Run, status Status, runError error) (Status, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return status, fmt.Errorf("begin run finish: %w", err)
+	}
+	defer tx.Rollback()
+	var cancelRequested bool
+	var cancelStatus Status
+	if err := tx.QueryRowContext(ctx, `
+SELECT cancel_requested, cancel_status FROM pull_requests
+WHERE repository = ? AND number = ? AND head_sha = ?
+`, run.Repository, run.Number, run.HeadSHA).Scan(&cancelRequested, &cancelStatus); err != nil {
+		return status, fmt.Errorf("read stop request before finish: %w", err)
+	}
+	if cancelRequested {
+		status = cancelStatus
+	}
 
 	now := time.Now().UTC().Truncate(time.Second)
 	errorText := ""
@@ -265,19 +449,19 @@ func (s *Store) FinishRun(ctx context.Context, run Run, status Status, runError 
 	}
 	if _, err := tx.ExecContext(ctx, `
 UPDATE runs SET status = ?, ended_at = ?, error = ? WHERE id = ?
-`, status, now.Format(time.RFC3339), errorText, run.ID); err != nil {
-		return fmt.Errorf("finish run: %w", err)
+	`, status, now.Format(time.RFC3339), errorText, run.ID); err != nil {
+		return status, fmt.Errorf("finish run: %w", err)
 	}
 	if _, err := tx.ExecContext(ctx, `
 UPDATE pull_requests SET status = ?, manual = 0, updated_at = ?
 WHERE repository = ? AND number = ? AND head_sha = ?
-`, status, now.Format(time.RFC3339), run.Repository, run.Number, run.HeadSHA); err != nil {
-		return fmt.Errorf("finish pull request: %w", err)
+	`, status, now.Format(time.RFC3339), run.Repository, run.Number, run.HeadSHA); err != nil {
+		return status, fmt.Errorf("finish pull request: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("commit run finish: %w", err)
+		return status, fmt.Errorf("commit run finish: %w", err)
 	}
-	return nil
+	return status, nil
 }
 
 func (s *Store) RecoverInterrupted(ctx context.Context) ([]Run, error) {
@@ -299,7 +483,10 @@ WHERE id = ? AND status = 'running'
 			return nil, fmt.Errorf("recover run %d: %w", run.ID, err)
 		}
 		if _, err := tx.ExecContext(ctx, `
-UPDATE pull_requests SET status = 'queued', recovery_run_id = ?, updated_at = ?
+UPDATE pull_requests SET
+  status = CASE WHEN cancel_requested = 1 THEN cancel_status ELSE 'queued' END,
+  recovery_run_id = CASE WHEN cancel_requested = 1 THEN 0 ELSE ? END,
+  updated_at = ?
 WHERE repository = ? AND number = ? AND head_sha = ? AND status = 'running'
 `, run.ID, now, run.Repository, run.Number, run.HeadSHA); err != nil {
 			return nil, fmt.Errorf("requeue run %d: %w", run.ID, err)
@@ -357,6 +544,12 @@ WHERE repository = ? AND number = ? AND head_sha = ? AND `+predicate,
 
 func (s *Store) UpsertPullRequest(ctx context.Context, pr PullRequest) (bool, error) {
 	now := time.Now().UTC().Truncate(time.Second)
+	if _, err := s.db.ExecContext(ctx, `
+INSERT OR IGNORE INTO pull_request_revisions (repository, number, head_sha, base_sha, detected_at)
+VALUES (?, ?, ?, ?, ?)
+`, pr.Repository, pr.Number, pr.HeadSHA, pr.BaseSHA, now.Format(time.RFC3339)); err != nil {
+		return false, fmt.Errorf("record pull request revision %s#%d: %w", pr.Repository, pr.Number, err)
+	}
 	result, err := s.db.ExecContext(ctx, `
 INSERT OR IGNORE INTO pull_requests (
   repository, number, head_sha, title, url, author, base_branch, base_sha, manual, status, detected_at, updated_at
@@ -405,18 +598,32 @@ ORDER BY id DESC LIMIT 1
 	return runID, true, nil
 }
 
-func (s *Store) HasPreviousHead(ctx context.Context, repository string, number int, headSHA string) (bool, error) {
+func (s *Store) HasPreviousRevision(ctx context.Context, repository string, number int, headSHA, baseSHA string) (bool, error) {
 	var previous bool
 	err := s.db.QueryRowContext(ctx, `
 SELECT EXISTS (
-  SELECT 1 FROM pull_requests
-  WHERE repository = ? AND number = ? AND head_sha <> ?
+  SELECT 1 FROM pull_request_revisions
+  WHERE repository = ? AND number = ? AND (head_sha <> ? OR base_sha <> ?)
 )
-`, repository, number, headSHA).Scan(&previous)
+`, repository, number, headSHA, baseSHA).Scan(&previous)
 	if err != nil {
-		return false, fmt.Errorf("check previous pull request head: %w", err)
+		return false, fmt.Errorf("check previous pull request revision: %w", err)
 	}
 	return previous, nil
+}
+
+func (s *Store) RevisionExists(ctx context.Context, repository string, number int, headSHA, baseSHA string) (bool, error) {
+	var exists bool
+	err := s.db.QueryRowContext(ctx, `
+SELECT EXISTS (
+  SELECT 1 FROM pull_request_revisions
+  WHERE repository = ? AND number = ? AND head_sha = ? AND base_sha = ?
+)
+`, repository, number, headSHA, baseSHA).Scan(&exists)
+	if err != nil {
+		return false, fmt.Errorf("check pull request revision: %w", err)
+	}
+	return exists, nil
 }
 
 func (s *Store) MarkReviewed(ctx context.Context, repository string, number int, headSHA string, runID int64) error {
@@ -466,10 +673,17 @@ func (s *Store) Counts(ctx context.Context) (map[Status]int, error) {
 }
 
 func (s *Store) Active(ctx context.Context) ([]PullRequest, error) {
+	return s.PullRequests(ctx, false)
+}
+
+func (s *Store) PullRequests(ctx context.Context, all bool) ([]PullRequest, error) {
+	predicate := "WHERE status IN ('detected', 'queued', 'running', 'failed')"
+	if all {
+		predicate = ""
+	}
 	rows, err := s.db.QueryContext(ctx, `
 SELECT repository, number, head_sha, title, url, author, base_branch, base_sha, manual, status, detected_at, updated_at
-FROM pull_requests
-WHERE status IN ('detected', 'queued', 'running', 'failed')
+FROM pull_requests `+predicate+`
 ORDER BY updated_at DESC
 `)
 	if err != nil {
@@ -516,4 +730,48 @@ ORDER BY started_at DESC
 		runs = append(runs, run)
 	}
 	return runs, rows.Err()
+}
+
+func (s *Store) Runs(ctx context.Context, all bool) ([]Run, error) {
+	predicate := "WHERE status IN ('running', 'failed')"
+	if all {
+		predicate = ""
+	}
+	rows, err := s.db.QueryContext(ctx, `
+SELECT id, repository, number, head_sha, attempt, status, started_at,
+       COALESCE(ended_at, ''), log_path, artifact_path, worktree_path, error
+FROM runs `+predicate+` ORDER BY started_at DESC
+`)
+	if err != nil {
+		return nil, fmt.Errorf("list runs: %w", err)
+	}
+	defer rows.Close()
+	var runs []Run
+	for rows.Next() {
+		var run Run
+		var startedAt, endedAt string
+		if err := rows.Scan(&run.ID, &run.Repository, &run.Number, &run.HeadSHA, &run.Attempt, &run.Status, &startedAt, &endedAt, &run.LogPath, &run.ArtifactPath, &run.WorktreePath, &run.Error); err != nil {
+			return nil, fmt.Errorf("scan run: %w", err)
+		}
+		run.StartedAt, _ = time.Parse(time.RFC3339, startedAt)
+		run.EndedAt, _ = time.Parse(time.RFC3339, endedAt)
+		runs = append(runs, run)
+	}
+	return runs, rows.Err()
+}
+
+func (s *Store) PreviousArtifact(ctx context.Context, repository string, number int, headSHA string) (ArtifactHandoff, error) {
+	var handoff ArtifactHandoff
+	err := s.db.QueryRowContext(ctx, `
+SELECT head_sha, artifact_path FROM runs
+WHERE repository = ? AND number = ? AND head_sha <> ? AND artifact_path <> ''
+ORDER BY id DESC LIMIT 1
+`, repository, number, headSHA).Scan(&handoff.HeadSHA, &handoff.Path)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ArtifactHandoff{}, nil
+	}
+	if err != nil {
+		return ArtifactHandoff{}, fmt.Errorf("find previous artifact: %w", err)
+	}
+	return handoff, nil
 }

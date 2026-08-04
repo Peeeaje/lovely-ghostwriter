@@ -15,6 +15,7 @@ import (
 type Config struct {
 	Daemon       DaemonConfig       `toml:"daemon"`
 	Review       ReviewConfig       `toml:"review"`
+	Patch        PatchConfig        `toml:"patch"`
 	Notification NotificationConfig `toml:"notification"`
 	Repositories []RepositoryConfig `toml:"repository"`
 }
@@ -33,6 +34,7 @@ type ReviewConfig struct {
 	PostReviews     bool     `toml:"post_reviews"`
 	ExtraArgs       []string `toml:"extra_args"`
 	Instructions    string   `toml:"instructions"`
+	MaxHeadRechecks int      `toml:"max_head_rechecks"`
 }
 
 type ReviewOverride struct {
@@ -44,6 +46,33 @@ type ReviewOverride struct {
 	PostReviews     *bool    `toml:"post_reviews,omitempty"`
 	ExtraArgs       []string `toml:"extra_args,omitempty"`
 	Instructions    string   `toml:"instructions,omitempty"`
+	MaxHeadRechecks *int     `toml:"max_head_rechecks,omitempty"`
+}
+
+type PatchConfig struct {
+	Enabled         bool     `toml:"enabled"`
+	Command         string   `toml:"command"`
+	Model           string   `toml:"model"`
+	ReasoningEffort string   `toml:"reasoning_effort"`
+	Sandbox         string   `toml:"sandbox"`
+	MaxIterations   int      `toml:"max_iterations"`
+	BranchPrefix    string   `toml:"branch_prefix"`
+	TitlePrefix     string   `toml:"title_prefix"`
+	ExtraArgs       []string `toml:"extra_args"`
+	Instructions    string   `toml:"instructions"`
+}
+
+type PatchOverride struct {
+	Enabled         *bool    `toml:"enabled,omitempty"`
+	Command         string   `toml:"command,omitempty"`
+	Model           string   `toml:"model,omitempty"`
+	ReasoningEffort string   `toml:"reasoning_effort,omitempty"`
+	Sandbox         string   `toml:"sandbox,omitempty"`
+	MaxIterations   int      `toml:"max_iterations,omitempty"`
+	BranchPrefix    string   `toml:"branch_prefix,omitempty"`
+	TitlePrefix     string   `toml:"title_prefix,omitempty"`
+	ExtraArgs       []string `toml:"extra_args,omitempty"`
+	Instructions    string   `toml:"instructions,omitempty"`
 }
 
 type NotificationConfig struct {
@@ -53,6 +82,7 @@ type NotificationConfig struct {
 	Started  bool   `toml:"started"`
 	Finished bool   `toml:"finished"`
 	Failed   bool   `toml:"failed"`
+	Detected bool   `toml:"detected"`
 }
 
 type RepositoryConfig struct {
@@ -67,6 +97,7 @@ type RepositoryConfig struct {
 	InitialTrigger string         `toml:"initial_trigger"`
 	UpdateTrigger  string         `toml:"update_trigger"`
 	Review         ReviewOverride `toml:"review,omitempty"`
+	Patch          PatchOverride  `toml:"patch,omitempty"`
 }
 
 const (
@@ -88,13 +119,24 @@ func Default() Config {
 			Sandbox:         "workspace-write",
 			Marker:          "codex-auto-review",
 			PostReviews:     false,
+			MaxHeadRechecks: 3,
+		},
+		Patch: PatchConfig{
+			Command:         "codex",
+			Model:           "gpt-5.6-sol",
+			ReasoningEffort: "xhigh",
+			Sandbox:         "workspace-write",
+			MaxIterations:   2,
+			BranchPrefix:    "develop/codex-auto-fix",
+			TitlePrefix:     "[codex-auto-fix]",
 		},
 		Notification: NotificationConfig{
-			Command:  "terminal-notifier",
+			Command:  "auto",
 			Timeout:  "5s",
 			Started:  true,
 			Finished: true,
 			Failed:   true,
+			Detected: true,
 		},
 		Repositories: []RepositoryConfig{{
 			Name:           "owner/repository",
@@ -180,6 +222,9 @@ func (c Config) Validate() error {
 	if strings.TrimSpace(c.Review.Marker) == "" {
 		return errors.New("review.marker is required")
 	}
+	if err := c.Patch.validate("patch"); err != nil {
+		return err
+	}
 	if c.Notification.Enabled && strings.TrimSpace(c.Notification.Command) == "" {
 		return errors.New("notification.command is required when notifications are enabled")
 	}
@@ -212,6 +257,9 @@ func (c Config) Validate() error {
 			return fmt.Errorf("%s requires at least one reviewer or team", prefix)
 		}
 		if err := repo.EffectiveReview(c.Review).validate(prefix + ".review"); err != nil {
+			return err
+		}
+		if err := repo.EffectivePatch(c.Patch).validate(prefix + ".patch"); err != nil {
 			return err
 		}
 		if _, ok := seen[repo.Name]; ok {
@@ -247,6 +295,25 @@ func (r ReviewConfig) validate(prefix string) error {
 	if strings.TrimSpace(r.Marker) == "" {
 		return fmt.Errorf("%s.marker is required", prefix)
 	}
+	if r.MaxHeadRechecks < 0 {
+		return fmt.Errorf("%s.max_head_rechecks must not be negative", prefix)
+	}
+	return nil
+}
+
+func (p PatchConfig) validate(prefix string) error {
+	if strings.TrimSpace(p.Command) == "" {
+		return fmt.Errorf("%s.command is required", prefix)
+	}
+	if !slices.Contains([]string{"workspace-write", "danger-full-access"}, p.Sandbox) {
+		return fmt.Errorf("%s.sandbox must be workspace-write or danger-full-access", prefix)
+	}
+	if p.MaxIterations < 1 {
+		return fmt.Errorf("%s.max_iterations must be at least 1", prefix)
+	}
+	if strings.TrimSpace(p.BranchPrefix) == "" || strings.TrimSpace(p.TitlePrefix) == "" {
+		return fmt.Errorf("%s.branch_prefix and title_prefix are required", prefix)
+	}
 	return nil
 }
 
@@ -275,7 +342,51 @@ func (r RepositoryConfig) EffectiveReview(global ReviewConfig) ReviewConfig {
 	if r.Review.Instructions != "" {
 		global.Instructions = r.Review.Instructions
 	}
+	if r.Review.MaxHeadRechecks != nil {
+		global.MaxHeadRechecks = *r.Review.MaxHeadRechecks
+	}
 	return global
+}
+
+func (r RepositoryConfig) EffectivePatch(global PatchConfig) PatchConfig {
+	if r.Patch.Enabled != nil {
+		global.Enabled = *r.Patch.Enabled
+	}
+	if r.Patch.Command != "" {
+		global.Command = r.Patch.Command
+	}
+	if r.Patch.Model != "" {
+		global.Model = r.Patch.Model
+	}
+	if r.Patch.ReasoningEffort != "" {
+		global.ReasoningEffort = r.Patch.ReasoningEffort
+	}
+	if r.Patch.Sandbox != "" {
+		global.Sandbox = r.Patch.Sandbox
+	}
+	if r.Patch.MaxIterations != 0 {
+		global.MaxIterations = r.Patch.MaxIterations
+	}
+	if r.Patch.BranchPrefix != "" {
+		global.BranchPrefix = r.Patch.BranchPrefix
+	}
+	if r.Patch.TitlePrefix != "" {
+		global.TitlePrefix = r.Patch.TitlePrefix
+	}
+	if r.Patch.ExtraArgs != nil {
+		global.ExtraArgs = r.Patch.ExtraArgs
+	}
+	if r.Patch.Instructions != "" {
+		global.Instructions = r.Patch.Instructions
+	}
+	return global
+}
+
+func (r RepositoryConfig) PatchPullRequest(global PatchConfig, title, headBranch, author, reviewer string, crossRepository bool) bool {
+	patch := r.EffectivePatch(global)
+	branchPrefix := strings.TrimSuffix(patch.BranchPrefix, "-")
+	return patch.Enabled && !crossRepository && author == reviewer &&
+		strings.HasPrefix(title, patch.TitlePrefix+" ") && strings.HasPrefix(headBranch, branchPrefix+"-")
 }
 
 func (r RepositoryConfig) Trigger(isUpdate bool) string {

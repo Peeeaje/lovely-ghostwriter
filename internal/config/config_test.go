@@ -59,12 +59,30 @@ reviewers = ["reviewer"]
 
 func TestRepositoryReviewOverridesGlobalReview(t *testing.T) {
 	post := true
+	zero := 0
 	repository := RepositoryConfig{Review: ReviewOverride{
-		Model: "repository-model", PostReviews: &post, Instructions: "Check the contract.", ExtraArgs: []string{},
+		Model: "repository-model", PostReviews: &post, Instructions: "Check the contract.", ExtraArgs: []string{}, MaxHeadRechecks: &zero,
 	}}
-	review := repository.EffectiveReview(ReviewConfig{Model: "global-model", Sandbox: "workspace-write", Marker: "marker"})
-	if review.Model != "repository-model" || !review.PostReviews || review.Instructions != "Check the contract." || review.ExtraArgs == nil {
+	review := repository.EffectiveReview(ReviewConfig{Model: "global-model", Sandbox: "workspace-write", Marker: "marker", MaxHeadRechecks: 3})
+	if review.Model != "repository-model" || !review.PostReviews || review.Instructions != "Check the contract." || review.ExtraArgs == nil || review.MaxHeadRechecks != 0 {
 		t.Fatalf("EffectiveReview() = %+v", review)
+	}
+}
+
+func TestPatchPullRequestNormalizesTrailingHyphen(t *testing.T) {
+	enabled := true
+	repository := RepositoryConfig{Patch: PatchOverride{Enabled: &enabled, BranchPrefix: "fix-"}}
+	if !repository.PatchPullRequest(Default().Patch, "[codex-auto-fix] Change", "fix-1-head", "reviewer", "reviewer", false) {
+		t.Fatal("PatchPullRequest() did not recognize its generated branch")
+	}
+}
+
+func TestRepositoryPatchOverridesGlobalPatch(t *testing.T) {
+	enabled := true
+	repository := RepositoryConfig{Patch: PatchOverride{Enabled: &enabled, Instructions: "Run repository checks."}}
+	patch := repository.EffectivePatch(Default().Patch)
+	if !patch.Enabled || patch.Instructions != "Run repository checks." || patch.MaxIterations != 2 {
+		t.Fatalf("EffectivePatch() = %+v", patch)
 	}
 }
 
