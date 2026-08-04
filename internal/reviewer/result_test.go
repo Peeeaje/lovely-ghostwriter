@@ -61,8 +61,33 @@ func TestEligibleAutomaticRejectsRetargetedBaseBranch(t *testing.T) {
 		ReviewRequests: []gh.ReviewRequest{{Login: "reviewer"}},
 	}}}
 	target := state.PullRequest{Repository: "owner/repository", Number: 1, HeadSHA: "head", BaseSHA: "base", BaseBranch: "main"}
-	eligible, err := runner.EligibleAutomatic(context.Background(), cfg.Repositories[0], target)
+	_, eligible, err := runner.PrepareAutomatic(context.Background(), cfg.Repositories[0], target)
 	if err != nil || eligible {
-		t.Fatalf("EligibleAutomatic() eligible=%v err=%v", eligible, err)
+		t.Fatalf("PrepareAutomatic() eligible=%v err=%v", eligible, err)
+	}
+}
+
+func TestPrepareAutomaticHydratesLegacyTarget(t *testing.T) {
+	cfg := config.Default()
+	cfg.Repositories[0].Reviewers = []string{"reviewer"}
+	runner := Runner{Config: cfg, GitHub: fakeGitHub{pr: gh.PullRequest{
+		State: "OPEN", HeadSHA: "head", BaseSHA: "base", BaseBranch: "main",
+		ReviewRequests: []gh.ReviewRequest{{Login: "reviewer"}},
+	}}}
+	target := state.PullRequest{Repository: "owner/repository", Number: 1, HeadSHA: "head"}
+	prepared, eligible, err := runner.PrepareAutomatic(context.Background(), cfg.Repositories[0], target)
+	if err != nil || !eligible || prepared.BaseSHA != "base" || prepared.BaseBranch != "main" {
+		t.Fatalf("PrepareAutomatic() target=%+v eligible=%v err=%v", prepared, eligible, err)
+	}
+}
+
+func TestRecoveredReviewPostedUsesPreviousRunMarker(t *testing.T) {
+	cfg := config.Default()
+	runner := Runner{Config: cfg, GitHub: fakeGitHub{pr: gh.PullRequest{
+		Reviews: []gh.Review{{Author: gh.Actor{Login: "reviewer"}, Body: "<!-- codex-auto-review reviewer=reviewer head=head run=41 -->"}},
+	}}}
+	posted, err := runner.RecoveredReviewPosted(context.Background(), state.PullRequest{HeadSHA: "head", RecoveryRunID: 41})
+	if err != nil || !posted {
+		t.Fatalf("RecoveredReviewPosted() posted=%v err=%v", posted, err)
 	}
 }

@@ -228,8 +228,8 @@ func TestRecoverInterruptedRequeuesRun(t *testing.T) {
 	if err != nil || len(runs) != 1 || runs[0].ID != run.ID {
 		t.Fatalf("RecoverInterrupted() runs=%+v err=%v", runs, err)
 	}
-	_, nextRun, ok, err := store.ClaimNext(context.Background())
-	if err != nil || !ok || nextRun.Attempt != 2 {
-		t.Fatalf("recovered ClaimNext() run=%+v ok=%v err=%v", nextRun, ok, err)
+	recovered, nextRun, ok, err := store.ClaimNext(context.Background())
+	if err != nil || !ok || nextRun.Attempt != 2 || recovered.RecoveryRunID != run.ID {
+		t.Fatalf("recovered ClaimNext() pr=%+v run=%+v ok=%v err=%v", recovered, nextRun, ok, err)
 	}
 }

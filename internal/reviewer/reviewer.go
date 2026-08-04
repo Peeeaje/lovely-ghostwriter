@@ -31,7 +31,30 @@ type Runner struct {
 	ArtifactRoot string
 }
 
-func (r *Runner) EligibleAutomatic(ctx context.Context, repository config.RepositoryConfig, target state.PullRequest) (bool, error) {
+func (r *Runner) PrepareAutomatic(ctx context.Context, repository config.RepositoryConfig, target state.PullRequest) (state.PullRequest, bool, error) {
+	current, err := r.GitHub.PullRequest(ctx, target.Repository, target.Number)
+	if err != nil {
+		return target, false, err
+	}
+	reviewer, err := r.GitHub.CurrentUser(ctx)
+	if err != nil {
+		return target, false, err
+	}
+	if current.HeadSHA != target.HeadSHA || target.BaseSHA != "" && (current.BaseSHA != target.BaseSHA || current.BaseBranch != target.BaseBranch) {
+		return target, false, nil
+	}
+	target.BaseBranch = current.BaseBranch
+	target.BaseSHA = current.BaseSHA
+	if !repository.AutoReviewBase(current.BaseBranch) {
+		return target, false, nil
+	}
+	return target, policy.Automatic(repository, current, r.Config.Review.Marker, reviewer), nil
+}
+
+func (r *Runner) RecoveredReviewPosted(ctx context.Context, target state.PullRequest) (bool, error) {
+	if target.RecoveryRunID == 0 {
+		return false, nil
+	}
 	current, err := r.GitHub.PullRequest(ctx, target.Repository, target.Number)
 	if err != nil {
 		return false, err
@@ -40,13 +63,7 @@ func (r *Runner) EligibleAutomatic(ctx context.Context, repository config.Reposi
 	if err != nil {
 		return false, err
 	}
-	if current.HeadSHA != target.HeadSHA || current.BaseSHA != target.BaseSHA {
-		return false, nil
-	}
-	if !repository.AutoReviewBase(current.BaseBranch) {
-		return false, nil
-	}
-	return policy.Automatic(repository, current, r.Config.Review.Marker, reviewer), nil
+	return gh.HasRunMarker(current, r.Config.Review.Marker, target.HeadSHA, reviewer, target.RecoveryRunID), nil
 }
 
 func (r *Runner) Run(ctx context.Context, repository config.RepositoryConfig, pr state.PullRequest, run state.Run) (status state.Status, runErr error) {

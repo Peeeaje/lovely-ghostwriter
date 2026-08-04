@@ -25,18 +25,19 @@ const (
 )
 
 type PullRequest struct {
-	Repository string
-	Number     int
-	HeadSHA    string
-	Title      string
-	URL        string
-	Author     string
-	BaseBranch string
-	BaseSHA    string
-	Manual     bool
-	Status     Status
-	DetectedAt time.Time
-	UpdatedAt  time.Time
+	Repository    string
+	Number        int
+	HeadSHA       string
+	Title         string
+	URL           string
+	Author        string
+	BaseBranch    string
+	BaseSHA       string
+	Manual        bool
+	RecoveryRunID int64
+	Status        Status
+	DetectedAt    time.Time
+	UpdatedAt     time.Time
 }
 
 type Store struct {
@@ -95,6 +96,7 @@ CREATE TABLE IF NOT EXISTS pull_requests (
   base_branch TEXT NOT NULL,
   base_sha TEXT NOT NULL DEFAULT '',
   manual INTEGER NOT NULL DEFAULT 0,
+  recovery_run_id INTEGER NOT NULL DEFAULT 0,
   status TEXT NOT NULL,
   detected_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
@@ -129,6 +131,9 @@ CREATE INDEX IF NOT EXISTS runs_status_idx ON runs(status, started_at DESC);
 		return err
 	}
 	if err := s.ensureColumn(ctx, "pull_requests", "manual", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+	if err := s.ensureColumn(ctx, "pull_requests", "recovery_run_id", "INTEGER NOT NULL DEFAULT 0"); err != nil {
 		return err
 	}
 	return nil
@@ -172,12 +177,12 @@ func (s *Store) ClaimNext(ctx context.Context) (PullRequest, Run, bool, error) {
 	var pr PullRequest
 	var detectedAt, updatedAt string
 	err = tx.QueryRowContext(ctx, `
-SELECT repository, number, head_sha, title, url, author, base_branch, base_sha, manual, status, detected_at, updated_at
+SELECT repository, number, head_sha, title, url, author, base_branch, base_sha, manual, recovery_run_id, status, detected_at, updated_at
 FROM pull_requests
 WHERE status = 'queued'
 ORDER BY detected_at, repository, number
 LIMIT 1
-`).Scan(&pr.Repository, &pr.Number, &pr.HeadSHA, &pr.Title, &pr.URL, &pr.Author, &pr.BaseBranch, &pr.BaseSHA, &pr.Manual, &pr.Status, &detectedAt, &updatedAt)
+`).Scan(&pr.Repository, &pr.Number, &pr.HeadSHA, &pr.Title, &pr.URL, &pr.Author, &pr.BaseBranch, &pr.BaseSHA, &pr.Manual, &pr.RecoveryRunID, &pr.Status, &detectedAt, &updatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return PullRequest{}, Run{}, false, nil
 	}
@@ -187,7 +192,7 @@ LIMIT 1
 
 	now := time.Now().UTC().Truncate(time.Second)
 	result, err := tx.ExecContext(ctx, `
-UPDATE pull_requests SET status = 'running', updated_at = ?
+UPDATE pull_requests SET status = 'running', recovery_run_id = 0, updated_at = ?
 WHERE repository = ? AND number = ? AND head_sha = ? AND status = 'queued'
 `, now.Format(time.RFC3339), pr.Repository, pr.Number, pr.HeadSHA)
 	if err != nil {
@@ -223,6 +228,17 @@ RETURNING id, attempt
 	run.Status = StatusRunning
 	run.StartedAt = now
 	return pr, run, true, nil
+}
+
+func (s *Store) SetRunningTarget(ctx context.Context, pr PullRequest) error {
+	_, err := s.db.ExecContext(ctx, `
+UPDATE pull_requests SET base_branch = ?, base_sha = ?, updated_at = ?
+WHERE repository = ? AND number = ? AND head_sha = ? AND status = 'running'
+`, pr.BaseBranch, pr.BaseSHA, time.Now().UTC().Truncate(time.Second).Format(time.RFC3339), pr.Repository, pr.Number, pr.HeadSHA)
+	if err != nil {
+		return fmt.Errorf("update running pull request target: %w", err)
+	}
+	return nil
 }
 
 func (s *Store) SetRunPaths(ctx context.Context, runID int64, logPath, artifactPath, worktreePath string) error {
@@ -283,9 +299,9 @@ WHERE id = ? AND status = 'running'
 			return nil, fmt.Errorf("recover run %d: %w", run.ID, err)
 		}
 		if _, err := tx.ExecContext(ctx, `
-UPDATE pull_requests SET status = 'queued', updated_at = ?
+UPDATE pull_requests SET status = 'queued', recovery_run_id = ?, updated_at = ?
 WHERE repository = ? AND number = ? AND head_sha = ? AND status = 'running'
-`, now, run.Repository, run.Number, run.HeadSHA); err != nil {
+`, run.ID, now, run.Repository, run.Number, run.HeadSHA); err != nil {
 			return nil, fmt.Errorf("requeue run %d: %w", run.ID, err)
 		}
 	}

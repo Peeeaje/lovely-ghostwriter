@@ -48,8 +48,19 @@ func (p *Pool) StartAvailable(ctx context.Context) (int, error) {
 			_ = p.store.FinishRun(ctx, run, state.StatusFailed, err)
 			continue
 		}
+		posted, err := p.runner.RecoveredReviewPosted(ctx, pr)
+		if err != nil {
+			_ = p.store.FinishRun(ctx, run, state.StatusFailed, err)
+			p.recordError(err)
+			continue
+		}
+		if posted {
+			_ = p.store.FinishRun(ctx, run, state.StatusReviewed, nil)
+			fmt.Fprintf(p.output, "recovered posted review %s#%d run=%d\n", pr.Repository, pr.Number, run.ID)
+			continue
+		}
 		if !pr.Manual {
-			eligible, err := p.runner.EligibleAutomatic(ctx, repository, pr)
+			prepared, eligible, err := p.runner.PrepareAutomatic(ctx, repository, pr)
 			if err != nil {
 				_ = p.store.FinishRun(ctx, run, state.StatusFailed, err)
 				p.recordError(err)
@@ -59,6 +70,12 @@ func (p *Pool) StartAvailable(ctx context.Context) (int, error) {
 			if !eligible {
 				_ = p.store.FinishRun(ctx, run, state.StatusCanceled, nil)
 				fmt.Fprintf(p.output, "canceled stale automatic queue %s#%d run=%d\n", pr.Repository, pr.Number, run.ID)
+				continue
+			}
+			pr = prepared
+			if err := p.store.SetRunningTarget(ctx, pr); err != nil {
+				_ = p.store.FinishRun(ctx, run, state.StatusFailed, err)
+				p.recordError(err)
 				continue
 			}
 		}
