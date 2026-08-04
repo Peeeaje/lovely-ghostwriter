@@ -8,10 +8,14 @@ The project is under active development. The current implementation can:
 - detect matching GitHub review requests with `gh`
 - classify pull requests as automatically queued or manually triggered
 - persist state safely in SQLite
+- consume the review queue with bounded concurrency
+- create an isolated Git worktree for each review
+- run Codex in dry-run or GitHub posting mode
+- verify a hidden review marker before recording a posted review as successful
 - run continuously as a daemon
 - install itself as a macOS LaunchAgent
 
-It does **not yet execute Codex reviews or post to GitHub**. Queued pull requests remain queued until the review worker is implemented.
+The review worker is intentionally review-only. It does not edit the original pull request branch or create patch pull requests yet.
 
 ## Requirements
 
@@ -60,6 +64,10 @@ max_concurrency = 3
 command = "codex"
 model = "gpt-5.6-sol"
 reasoning_effort = "high"
+sandbox = "workspace-write"
+marker = "codex-auto-review"
+post_reviews = false # change to true after validating a dry-run
+extra_args = []
 
 [[repository]]
 name = "owner/repository"
@@ -89,6 +97,12 @@ lovely-ghostwriter scan
 # Inspect current state
 lovely-ghostwriter status
 
+# Manually queue any open pull request, including a draft
+lovely-ghostwriter enqueue owner/repository#123
+
+# Run the current queue in the foreground
+lovely-ghostwriter run-queue
+
 # Run in the foreground
 lovely-ghostwriter daemon
 ```
@@ -117,7 +131,7 @@ Remove it with:
 lovely-ghostwriter service uninstall
 ```
 
-The service is restarted by `launchd` after a crash and starts again after login.
+The service is restarted by `launchd` after a crash and starts again after login. Each daemon scan also starts queued reviews up to `max_concurrency`.
 
 ## State
 
@@ -127,16 +141,15 @@ Runtime state is stored separately from configuration:
 ~/Library/Application Support/lovely-ghostwriter/state.db
 ```
 
-SQLite uses WAL mode and treats `(repository, pull request number, head SHA)` as the identity of a detected revision. This keeps repeated scans idempotent and avoids shared-file update races when review workers are added.
+SQLite uses WAL mode and treats `(repository, pull request number, head SHA)` as the identity of a detected revision. This keeps repeated scans idempotent and avoids shared-file update races between review workers.
 
 ## Roadmap
 
-1. Codex review worker with isolated Git worktrees
-2. Explicit GitHub posting policy and review markers
-3. Queue, retry, cancel, and crash recovery
-4. Clickable desktop notifications
-5. Homebrew distribution
-6. Optional macOS menu bar UI
+1. Patch pull request orchestration for blocking findings
+2. Queue retry, cancel, and crash recovery
+3. Clickable desktop notifications
+4. Homebrew distribution
+5. Optional macOS menu bar UI
 
 ## License
 

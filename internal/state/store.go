@@ -3,6 +3,7 @@ package state
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -14,29 +15,48 @@ import (
 type Status string
 
 const (
-	StatusDetected Status = "detected"
-	StatusQueued   Status = "queued"
-	StatusRunning  Status = "running"
-	StatusReviewed Status = "reviewed"
-	StatusFailed   Status = "failed"
-	StatusCanceled Status = "canceled"
+	StatusDetected  Status = "detected"
+	StatusQueued    Status = "queued"
+	StatusRunning   Status = "running"
+	StatusReviewed  Status = "reviewed"
+	StatusCompleted Status = "completed"
+	StatusFailed    Status = "failed"
+	StatusCanceled  Status = "canceled"
 )
 
 type PullRequest struct {
-	Repository string
-	Number     int
-	HeadSHA    string
-	Title      string
-	URL        string
-	Author     string
-	BaseBranch string
-	Status     Status
-	DetectedAt time.Time
-	UpdatedAt  time.Time
+	Repository    string
+	Number        int
+	HeadSHA       string
+	Title         string
+	URL           string
+	Author        string
+	BaseBranch    string
+	BaseSHA       string
+	Manual        bool
+	RecoveryRunID int64
+	Status        Status
+	DetectedAt    time.Time
+	UpdatedAt     time.Time
 }
 
 type Store struct {
 	db *sql.DB
+}
+
+type Run struct {
+	ID           int64
+	Repository   string
+	Number       int
+	HeadSHA      string
+	Attempt      int
+	Status       Status
+	StartedAt    time.Time
+	EndedAt      time.Time
+	LogPath      string
+	ArtifactPath string
+	WorktreePath string
+	Error        string
 }
 
 func Open(path string) (*Store, error) {
@@ -74,6 +94,9 @@ CREATE TABLE IF NOT EXISTS pull_requests (
   url TEXT NOT NULL,
   author TEXT NOT NULL,
   base_branch TEXT NOT NULL,
+  base_sha TEXT NOT NULL DEFAULT '',
+  manual INTEGER NOT NULL DEFAULT 0,
+  recovery_run_id INTEGER NOT NULL DEFAULT 0,
   status TEXT NOT NULL,
   detected_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
@@ -82,20 +105,263 @@ CREATE TABLE IF NOT EXISTS pull_requests (
 
 CREATE INDEX IF NOT EXISTS pull_requests_status_idx
   ON pull_requests(status, updated_at DESC);
+
+CREATE TABLE IF NOT EXISTS runs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  repository TEXT NOT NULL,
+  number INTEGER NOT NULL,
+  head_sha TEXT NOT NULL,
+  attempt INTEGER NOT NULL,
+  status TEXT NOT NULL,
+  started_at TEXT NOT NULL,
+  ended_at TEXT,
+  log_path TEXT NOT NULL DEFAULT '',
+  artifact_path TEXT NOT NULL DEFAULT '',
+  worktree_path TEXT NOT NULL DEFAULT '',
+  error TEXT NOT NULL DEFAULT '',
+  UNIQUE (repository, number, head_sha, attempt)
+);
+
+CREATE INDEX IF NOT EXISTS runs_status_idx ON runs(status, started_at DESC);
 `
 	if _, err := s.db.ExecContext(ctx, schema); err != nil {
 		return fmt.Errorf("migrate state database: %w", err)
 	}
+	if err := s.ensureColumn(ctx, "pull_requests", "base_sha", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
+	if err := s.ensureColumn(ctx, "pull_requests", "manual", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
+	if err := s.ensureColumn(ctx, "pull_requests", "recovery_run_id", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
 	return nil
+}
+
+func (s *Store) ensureColumn(ctx context.Context, table, column, definition string) error {
+	rows, err := s.db.QueryContext(ctx, "PRAGMA table_info("+table+")")
+	if err != nil {
+		return fmt.Errorf("inspect %s columns: %w", table, err)
+	}
+	found := false
+	for rows.Next() {
+		var cid, notNull, primaryKey int
+		var name, columnType string
+		var defaultValue any
+		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &primaryKey); err != nil {
+			rows.Close()
+			return fmt.Errorf("scan %s columns: %w", table, err)
+		}
+		found = found || name == column
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	if found {
+		return nil
+	}
+	if _, err := s.db.ExecContext(ctx, "ALTER TABLE "+table+" ADD COLUMN "+column+" "+definition); err != nil {
+		return fmt.Errorf("add %s.%s: %w", table, column, err)
+	}
+	return nil
+}
+
+func (s *Store) ClaimNext(ctx context.Context) (PullRequest, Run, bool, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return PullRequest{}, Run{}, false, fmt.Errorf("begin queue claim: %w", err)
+	}
+	defer tx.Rollback()
+
+	var pr PullRequest
+	var detectedAt, updatedAt string
+	err = tx.QueryRowContext(ctx, `
+SELECT repository, number, head_sha, title, url, author, base_branch, base_sha, manual, recovery_run_id, status, detected_at, updated_at
+FROM pull_requests
+WHERE status = 'queued'
+ORDER BY detected_at, repository, number
+LIMIT 1
+`).Scan(&pr.Repository, &pr.Number, &pr.HeadSHA, &pr.Title, &pr.URL, &pr.Author, &pr.BaseBranch, &pr.BaseSHA, &pr.Manual, &pr.RecoveryRunID, &pr.Status, &detectedAt, &updatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return PullRequest{}, Run{}, false, nil
+	}
+	if err != nil {
+		return PullRequest{}, Run{}, false, fmt.Errorf("select queued pull request: %w", err)
+	}
+
+	now := time.Now().UTC().Truncate(time.Second)
+	result, err := tx.ExecContext(ctx, `
+UPDATE pull_requests SET status = 'running', recovery_run_id = 0, updated_at = ?
+WHERE repository = ? AND number = ? AND head_sha = ? AND status = 'queued'
+`, now.Format(time.RFC3339), pr.Repository, pr.Number, pr.HeadSHA)
+	if err != nil {
+		return PullRequest{}, Run{}, false, fmt.Errorf("claim pull request: %w", err)
+	}
+	rows, err := result.RowsAffected()
+	if err != nil || rows != 1 {
+		return PullRequest{}, Run{}, false, err
+	}
+
+	var run Run
+	err = tx.QueryRowContext(ctx, `
+INSERT INTO runs (repository, number, head_sha, attempt, status, started_at)
+VALUES (?, ?, ?, (
+  SELECT COALESCE(MAX(attempt), 0) + 1 FROM runs
+  WHERE repository = ? AND number = ? AND head_sha = ?
+), 'running', ?)
+RETURNING id, attempt
+`, pr.Repository, pr.Number, pr.HeadSHA, pr.Repository, pr.Number, pr.HeadSHA, now.Format(time.RFC3339)).Scan(&run.ID, &run.Attempt)
+	if err != nil {
+		return PullRequest{}, Run{}, false, fmt.Errorf("create run: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return PullRequest{}, Run{}, false, fmt.Errorf("commit queue claim: %w", err)
+	}
+
+	pr.Status = StatusRunning
+	pr.DetectedAt, _ = time.Parse(time.RFC3339, detectedAt)
+	pr.UpdatedAt = now
+	run.Repository = pr.Repository
+	run.Number = pr.Number
+	run.HeadSHA = pr.HeadSHA
+	run.Status = StatusRunning
+	run.StartedAt = now
+	return pr, run, true, nil
+}
+
+func (s *Store) SetRunningTarget(ctx context.Context, pr PullRequest) error {
+	_, err := s.db.ExecContext(ctx, `
+UPDATE pull_requests SET base_branch = ?, base_sha = ?, updated_at = ?
+WHERE repository = ? AND number = ? AND head_sha = ? AND status = 'running'
+`, pr.BaseBranch, pr.BaseSHA, time.Now().UTC().Truncate(time.Second).Format(time.RFC3339), pr.Repository, pr.Number, pr.HeadSHA)
+	if err != nil {
+		return fmt.Errorf("update running pull request target: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) SetRunPaths(ctx context.Context, runID int64, logPath, artifactPath, worktreePath string) error {
+	_, err := s.db.ExecContext(ctx, `
+UPDATE runs SET log_path = ?, artifact_path = ?, worktree_path = ? WHERE id = ?
+`, logPath, artifactPath, worktreePath, runID)
+	if err != nil {
+		return fmt.Errorf("set run paths: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) FinishRun(ctx context.Context, run Run, status Status, runError error) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin run finish: %w", err)
+	}
+	defer tx.Rollback()
+
+	now := time.Now().UTC().Truncate(time.Second)
+	errorText := ""
+	if runError != nil {
+		errorText = runError.Error()
+	}
+	if _, err := tx.ExecContext(ctx, `
+UPDATE runs SET status = ?, ended_at = ?, error = ? WHERE id = ?
+`, status, now.Format(time.RFC3339), errorText, run.ID); err != nil {
+		return fmt.Errorf("finish run: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `
+UPDATE pull_requests SET status = ?, manual = 0, updated_at = ?
+WHERE repository = ? AND number = ? AND head_sha = ?
+`, status, now.Format(time.RFC3339), run.Repository, run.Number, run.HeadSHA); err != nil {
+		return fmt.Errorf("finish pull request: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit run finish: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) RecoverInterrupted(ctx context.Context) ([]Run, error) {
+	runs, err := s.runningRuns(ctx)
+	if err != nil || len(runs) == 0 {
+		return runs, err
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("begin interrupted run recovery: %w", err)
+	}
+	defer tx.Rollback()
+	now := time.Now().UTC().Truncate(time.Second).Format(time.RFC3339)
+	for _, run := range runs {
+		if _, err := tx.ExecContext(ctx, `
+UPDATE runs SET status = 'failed', ended_at = ?, error = 'queue consumer stopped before completion'
+WHERE id = ? AND status = 'running'
+`, now, run.ID); err != nil {
+			return nil, fmt.Errorf("recover run %d: %w", run.ID, err)
+		}
+		if _, err := tx.ExecContext(ctx, `
+UPDATE pull_requests SET status = 'queued', recovery_run_id = ?, updated_at = ?
+WHERE repository = ? AND number = ? AND head_sha = ? AND status = 'running'
+`, run.ID, now, run.Repository, run.Number, run.HeadSHA); err != nil {
+			return nil, fmt.Errorf("requeue run %d: %w", run.ID, err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("commit interrupted run recovery: %w", err)
+	}
+	return runs, nil
+}
+
+func (s *Store) runningRuns(ctx context.Context) ([]Run, error) {
+	rows, err := s.db.QueryContext(ctx, `
+SELECT id, repository, number, head_sha, attempt, status, started_at,
+       COALESCE(ended_at, ''), log_path, artifact_path, worktree_path, error
+FROM runs WHERE status = 'running' ORDER BY started_at
+`)
+	if err != nil {
+		return nil, fmt.Errorf("list running runs: %w", err)
+	}
+	defer rows.Close()
+	var runs []Run
+	for rows.Next() {
+		var run Run
+		var startedAt, endedAt string
+		if err := rows.Scan(&run.ID, &run.Repository, &run.Number, &run.HeadSHA, &run.Attempt, &run.Status, &startedAt, &endedAt, &run.LogPath, &run.ArtifactPath, &run.WorktreePath, &run.Error); err != nil {
+			return nil, fmt.Errorf("scan running run: %w", err)
+		}
+		run.StartedAt, _ = time.Parse(time.RFC3339, startedAt)
+		runs = append(runs, run)
+	}
+	return runs, rows.Err()
+}
+
+func (s *Store) Enqueue(ctx context.Context, pr PullRequest, force bool) (bool, error) {
+	created, err := s.UpsertPullRequest(ctx, pr)
+	if err != nil || created {
+		return created, err
+	}
+	predicate := "status = 'detected'"
+	if force {
+		predicate = "status != 'running'"
+	}
+	now := time.Now().UTC().Truncate(time.Second).Format(time.RFC3339)
+	result, err := s.db.ExecContext(ctx, `
+UPDATE pull_requests SET status = 'queued', manual = 1, updated_at = ?
+WHERE repository = ? AND number = ? AND head_sha = ? AND `+predicate,
+		now, pr.Repository, pr.Number, pr.HeadSHA)
+	if err != nil {
+		return false, fmt.Errorf("requeue pull request: %w", err)
+	}
+	rows, err := result.RowsAffected()
+	return rows == 1, err
 }
 
 func (s *Store) UpsertPullRequest(ctx context.Context, pr PullRequest) (bool, error) {
 	now := time.Now().UTC().Truncate(time.Second)
 	result, err := s.db.ExecContext(ctx, `
 INSERT OR IGNORE INTO pull_requests (
-  repository, number, head_sha, title, url, author, base_branch, status, detected_at, updated_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-`, pr.Repository, pr.Number, pr.HeadSHA, pr.Title, pr.URL, pr.Author, pr.BaseBranch, pr.Status, now.Format(time.RFC3339), now.Format(time.RFC3339))
+  repository, number, head_sha, title, url, author, base_branch, base_sha, manual, status, detected_at, updated_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+`, pr.Repository, pr.Number, pr.HeadSHA, pr.Title, pr.URL, pr.Author, pr.BaseBranch, pr.BaseSHA, pr.Manual, pr.Status, now.Format(time.RFC3339), now.Format(time.RFC3339))
 	if err != nil {
 		return false, fmt.Errorf("insert pull request %s#%d: %w", pr.Repository, pr.Number, err)
 	}
@@ -106,13 +372,64 @@ INSERT OR IGNORE INTO pull_requests (
 	if rows == 0 {
 		if _, err := s.db.ExecContext(ctx, `
 UPDATE pull_requests
-SET title = ?, url = ?, author = ?, base_branch = ?, updated_at = ?
+SET title = ?, url = ?, author = ?,
+    status = CASE
+      WHEN manual = 0 AND ? = 0 AND status IN ('detected', 'canceled') AND ? = 'queued' THEN ?
+      WHEN manual = 0 AND (base_sha <> ? OR base_branch <> ?) AND status IN ('detected', 'canceled', 'failed', 'completed', 'reviewed') THEN ?
+      ELSE status
+    END,
+    base_branch = CASE WHEN status = 'running' THEN base_branch ELSE ? END,
+    base_sha = CASE WHEN status = 'running' THEN base_sha ELSE ? END,
+    updated_at = ?
 WHERE repository = ? AND number = ? AND head_sha = ?
-`, pr.Title, pr.URL, pr.Author, pr.BaseBranch, now.Format(time.RFC3339), pr.Repository, pr.Number, pr.HeadSHA); err != nil {
+`, pr.Title, pr.URL, pr.Author, pr.Manual, pr.Status, pr.Status, pr.BaseSHA, pr.BaseBranch, pr.Status, pr.BaseBranch, pr.BaseSHA, now.Format(time.RFC3339), pr.Repository, pr.Number, pr.HeadSHA); err != nil {
 			return false, fmt.Errorf("update pull request %s#%d: %w", pr.Repository, pr.Number, err)
 		}
 	}
 	return rows == 1, nil
+}
+
+func (s *Store) LatestFailedRunID(ctx context.Context, repository string, number int, headSHA string) (int64, bool, error) {
+	var runID int64
+	err := s.db.QueryRowContext(ctx, `
+SELECT id FROM runs
+WHERE repository = ? AND number = ? AND head_sha = ? AND status = 'failed'
+ORDER BY id DESC LIMIT 1
+`, repository, number, headSHA).Scan(&runID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, false, nil
+	}
+	if err != nil {
+		return 0, false, fmt.Errorf("find latest failed run: %w", err)
+	}
+	return runID, true, nil
+}
+
+func (s *Store) MarkReviewed(ctx context.Context, repository string, number int, headSHA string, runID int64) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin review reconciliation: %w", err)
+	}
+	defer tx.Rollback()
+	now := time.Now().UTC().Truncate(time.Second).Format(time.RFC3339)
+	result, err := tx.ExecContext(ctx, `
+UPDATE runs SET status = 'reviewed', ended_at = ?, error = ''
+WHERE id = ? AND repository = ? AND number = ? AND head_sha = ? AND status = 'failed'
+`, now, runID, repository, number, headSHA)
+	if err != nil {
+		return fmt.Errorf("reconcile failed run: %w", err)
+	}
+	rows, err := result.RowsAffected()
+	if err != nil || rows != 1 {
+		return fmt.Errorf("failed run %d is no longer eligible for reconciliation", runID)
+	}
+	if _, err := tx.ExecContext(ctx, `
+UPDATE pull_requests SET status = 'reviewed', updated_at = ?
+WHERE repository = ? AND number = ? AND head_sha = ? AND status = 'failed'
+`, now, repository, number, headSHA); err != nil {
+		return fmt.Errorf("reconcile reviewed pull request: %w", err)
+	}
+	return tx.Commit()
 }
 
 func (s *Store) Counts(ctx context.Context) (map[Status]int, error) {
@@ -136,7 +453,7 @@ func (s *Store) Counts(ctx context.Context) (map[Status]int, error) {
 
 func (s *Store) Active(ctx context.Context) ([]PullRequest, error) {
 	rows, err := s.db.QueryContext(ctx, `
-SELECT repository, number, head_sha, title, url, author, base_branch, status, detected_at, updated_at
+SELECT repository, number, head_sha, title, url, author, base_branch, base_sha, manual, status, detected_at, updated_at
 FROM pull_requests
 WHERE status IN ('detected', 'queued', 'running', 'failed')
 ORDER BY updated_at DESC
@@ -150,7 +467,7 @@ ORDER BY updated_at DESC
 	for rows.Next() {
 		var pr PullRequest
 		var detectedAt, updatedAt string
-		if err := rows.Scan(&pr.Repository, &pr.Number, &pr.HeadSHA, &pr.Title, &pr.URL, &pr.Author, &pr.BaseBranch, &pr.Status, &detectedAt, &updatedAt); err != nil {
+		if err := rows.Scan(&pr.Repository, &pr.Number, &pr.HeadSHA, &pr.Title, &pr.URL, &pr.Author, &pr.BaseBranch, &pr.BaseSHA, &pr.Manual, &pr.Status, &detectedAt, &updatedAt); err != nil {
 			return nil, fmt.Errorf("scan pull request: %w", err)
 		}
 		pr.DetectedAt, _ = time.Parse(time.RFC3339, detectedAt)
@@ -158,4 +475,31 @@ ORDER BY updated_at DESC
 		prs = append(prs, pr)
 	}
 	return prs, rows.Err()
+}
+
+func (s *Store) ActiveRuns(ctx context.Context) ([]Run, error) {
+	rows, err := s.db.QueryContext(ctx, `
+SELECT id, repository, number, head_sha, attempt, status, started_at,
+       COALESCE(ended_at, ''), log_path, artifact_path, worktree_path, error
+FROM runs
+WHERE status IN ('running', 'failed')
+ORDER BY started_at DESC
+`)
+	if err != nil {
+		return nil, fmt.Errorf("list active runs: %w", err)
+	}
+	defer rows.Close()
+
+	var runs []Run
+	for rows.Next() {
+		var run Run
+		var startedAt, endedAt string
+		if err := rows.Scan(&run.ID, &run.Repository, &run.Number, &run.HeadSHA, &run.Attempt, &run.Status, &startedAt, &endedAt, &run.LogPath, &run.ArtifactPath, &run.WorktreePath, &run.Error); err != nil {
+			return nil, fmt.Errorf("scan run: %w", err)
+		}
+		run.StartedAt, _ = time.Parse(time.RFC3339, startedAt)
+		run.EndedAt, _ = time.Parse(time.RFC3339, endedAt)
+		runs = append(runs, run)
+	}
+	return runs, rows.Err()
 }
