@@ -77,7 +77,9 @@ func run(args []string, stdout, stderr io.Writer) error {
 	case "enqueue":
 		return enqueue(context.Background(), opts, remaining[1:], stdout)
 	case "run-queue":
-		return runQueue(context.Background(), opts, stdout)
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer stop()
+		return runQueue(ctx, opts, stdout)
 	case "status":
 		return status(context.Background(), opts, stdout)
 	case "daemon":

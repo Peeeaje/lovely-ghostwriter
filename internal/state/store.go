@@ -302,10 +302,15 @@ INSERT OR IGNORE INTO pull_requests (
 	if rows == 0 {
 		if _, err := s.db.ExecContext(ctx, `
 UPDATE pull_requests
-SET title = ?, url = ?, author = ?, base_branch = ?, base_sha = ?,
+SET title = ?, url = ?, author = ?, base_branch = ?,
+    status = CASE
+      WHEN manual = 0 AND base_sha <> ? AND status IN ('canceled', 'failed', 'completed', 'reviewed') THEN ?
+      ELSE status
+    END,
+    base_sha = ?,
     manual = CASE WHEN ? THEN 1 ELSE manual END, updated_at = ?
 WHERE repository = ? AND number = ? AND head_sha = ?
-`, pr.Title, pr.URL, pr.Author, pr.BaseBranch, pr.BaseSHA, pr.Manual, now.Format(time.RFC3339), pr.Repository, pr.Number, pr.HeadSHA); err != nil {
+`, pr.Title, pr.URL, pr.Author, pr.BaseBranch, pr.BaseSHA, pr.Status, pr.BaseSHA, pr.Manual, now.Format(time.RFC3339), pr.Repository, pr.Number, pr.HeadSHA); err != nil {
 			return false, fmt.Errorf("update pull request %s#%d: %w", pr.Repository, pr.Number, err)
 		}
 	}
