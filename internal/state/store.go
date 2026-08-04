@@ -374,7 +374,7 @@ INSERT OR IGNORE INTO pull_requests (
 UPDATE pull_requests
 SET title = ?, url = ?, author = ?,
     status = CASE
-      WHEN manual = 0 AND (base_sha <> ? OR base_branch <> ?) AND status IN ('canceled', 'failed', 'completed', 'reviewed') THEN ?
+      WHEN manual = 0 AND (base_sha <> ? OR base_branch <> ?) AND status IN ('detected', 'canceled', 'failed', 'completed', 'reviewed') THEN ?
       ELSE status
     END,
     base_branch = CASE WHEN status = 'running' THEN base_branch ELSE ? END,
