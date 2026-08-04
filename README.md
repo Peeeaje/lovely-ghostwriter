@@ -47,10 +47,10 @@ Create the default configuration:
 lovely-ghostwriter init
 ```
 
-On macOS this writes:
+By default this writes:
 
 ```text
-~/Library/Application Support/lovely-ghostwriter/config.toml
+~/.config/lovely-ghostwriter/config.toml
 ```
 
 Edit the generated file:
@@ -135,11 +135,14 @@ The service is restarted by `launchd` after a crash and starts again after login
 
 ## State
 
-Runtime state is stored separately from configuration:
+Runtime state and logs are stored separately from configuration:
 
 ```text
-~/Library/Application Support/lovely-ghostwriter/state.db
+~/.local/state/lovely-ghostwriter/state.db
+~/.local/state/lovely-ghostwriter/lovely-ghostwriter.log
 ```
+
+`XDG_CONFIG_HOME` and `XDG_STATE_HOME` override these base directories.
 
 SQLite uses WAL mode and treats `(repository, pull request number, head SHA)` as the identity of a detected revision. This keeps repeated scans idempotent and avoids shared-file update races between review workers.
 

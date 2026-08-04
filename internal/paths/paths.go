@@ -1,7 +1,6 @@
 package paths
 
 import (
-	"fmt"
 	"os"
 	"path/filepath"
 )
@@ -17,21 +16,25 @@ type Paths struct {
 }
 
 func Default() (Paths, error) {
-	configDir, err := os.UserConfigDir()
-	if err != nil {
-		return Paths{}, fmt.Errorf("resolve user config directory: %w", err)
-	}
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return Paths{}, fmt.Errorf("resolve home directory: %w", err)
+		return Paths{}, err
 	}
-
-	root := filepath.Join(configDir, AppName)
+	configRoot := os.Getenv("XDG_CONFIG_HOME")
+	if configRoot == "" {
+		configRoot = filepath.Join(home, ".config")
+	}
+	stateRoot := os.Getenv("XDG_STATE_HOME")
+	if stateRoot == "" {
+		stateRoot = filepath.Join(home, ".local", "state")
+	}
+	configDir := filepath.Join(configRoot, AppName)
+	stateDir := filepath.Join(stateRoot, AppName)
 	return Paths{
-		Root:        root,
-		Config:      filepath.Join(root, "config.toml"),
-		State:       filepath.Join(root, "state.db"),
-		Log:         filepath.Join(root, "lovely-ghostwriter.log"),
+		Root:        stateDir,
+		Config:      filepath.Join(configDir, "config.toml"),
+		State:       filepath.Join(stateDir, "state.db"),
+		Log:         filepath.Join(stateDir, "lovely-ghostwriter.log"),
 		LaunchAgent: filepath.Join(home, "Library", "LaunchAgents", "io.github.peeeaje.lovely-ghostwriter.plist"),
 	}, nil
 }
