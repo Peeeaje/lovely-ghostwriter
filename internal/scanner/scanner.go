@@ -17,6 +17,7 @@ type PullRequestSource interface {
 
 type PullRequestStore interface {
 	UpsertPullRequest(context.Context, state.PullRequest) (bool, error)
+	HasPreviousHead(context.Context, string, int, string) (bool, error)
 	LatestFailedRunID(context.Context, string, int, string) (int64, bool, error)
 	MarkReviewed(context.Context, string, int, string, int64) error
 }
@@ -48,12 +49,13 @@ func (s *Scanner) Scan(ctx context.Context, cfg config.Config) (Result, error) {
 			return result, err
 		}
 		for _, pr := range prs {
-			if gh.HasMarker(pr, cfg.Review.Marker, pr.HeadSHA, reviewer) {
+			review := repository.EffectiveReview(cfg.Review)
+			if gh.HasMarker(pr, review.Marker, pr.HeadSHA, reviewer) {
 				runID, failed, err := s.store.LatestFailedRunID(ctx, repository.Name, pr.Number, pr.HeadSHA)
 				if err != nil {
 					return result, err
 				}
-				if failed && gh.HasRunMarker(pr, cfg.Review.Marker, pr.HeadSHA, reviewer, runID) {
+				if failed && gh.HasRunMarker(pr, review.Marker, pr.HeadSHA, reviewer, runID) {
 					if err := s.store.MarkReviewed(ctx, repository.Name, pr.Number, pr.HeadSHA, runID); err != nil {
 						return result, err
 					}
@@ -61,13 +63,21 @@ func (s *Scanner) Scan(ctx context.Context, cfg config.Config) (Result, error) {
 				result.Skipped++
 				continue
 			}
-			if !policy.Automatic(repository, pr, cfg.Review.Marker, reviewer) {
+			if !policy.Candidate(repository, pr, review.Marker, reviewer) {
 				result.Skipped++
 				continue
 			}
+			trigger := repository.Trigger(false)
+			if trigger != repository.Trigger(true) {
+				isUpdate, err := s.store.HasPreviousHead(ctx, repository.Name, pr.Number, pr.HeadSHA)
+				if err != nil {
+					return result, err
+				}
+				trigger = repository.Trigger(isUpdate)
+			}
 
 			status := state.StatusDetected
-			if repository.AutoReviewBase(pr.BaseBranch) {
+			if repository.AutoReviewBase(pr.BaseBranch) && policy.Automatic(repository, pr, review.Marker, reviewer, trigger) {
 				status = state.StatusQueued
 			}
 			created, err := s.store.UpsertPullRequest(ctx, state.PullRequest{

@@ -68,6 +68,15 @@ sandbox = "workspace-write"
 marker = "codex-auto-review"
 post_reviews = false # change to true after validating a dry-run
 extra_args = []
+instructions = ""
+
+[notification]
+enabled = false
+command = "terminal-notifier"
+timeout = "5s"
+started = true
+finished = true
+failed = true
 
 [[repository]]
 name = "owner/repository"
@@ -78,9 +87,29 @@ reviewers = ["your-github-login"]
 teams = []
 exclude_authors = ["app/dependabot", "app/renovate", "dependabot[bot]", "renovate[bot]"]
 include_drafts = false
+initial_trigger = "review-request"
+update_trigger = "review-request"
 ```
 
-An empty `authors` list allows every author except `exclude_authors`. A pull request must be requested from one of the configured users or teams. Pull requests targeting `base_branches` are queued; other matching pull requests are recorded as detected only.
+An empty `authors` list allows every author except `exclude_authors`. With the default trigger, a pull request must be requested from one of the configured users or teams. Pull requests targeting `base_branches` are queued; other matching pull requests are recorded as detected only.
+
+`initial_trigger` and `update_trigger` accept `review-request`, `always`, or `manual`. The default keeps both phases gated by a matching GitHub review request.
+
+Append trusted review guidance with `review.instructions`. Each repository can override review settings without changing the global defaults:
+
+```toml
+[[repository]]
+name = "owner/repository"
+# ...
+
+[repository.review]
+model = "gpt-5.6-sol"
+reasoning_effort = "high"
+post_reviews = true
+instructions = "Prioritize API compatibility."
+```
+
+On macOS, notifications use `terminal-notifier`. Started, finished, and failed notifications include the pull request title and open its URL when clicked. `notification.timeout` prevents a broken notifier from blocking review workers.
 
 Validate the local environment before starting the daemon:
 

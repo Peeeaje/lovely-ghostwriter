@@ -7,7 +7,7 @@ import (
 	gh "github.com/Peeeaje/lovely-ghostwriter/internal/github"
 )
 
-func Automatic(repository config.RepositoryConfig, pr gh.PullRequest, marker, reviewer string) bool {
+func Candidate(repository config.RepositoryConfig, pr gh.PullRequest, marker, reviewer string) bool {
 	if pr.State != "OPEN" || (pr.Draft && !repository.IncludeDrafts) {
 		return false
 	}
@@ -15,6 +15,19 @@ func Automatic(repository config.RepositoryConfig, pr gh.PullRequest, marker, re
 		return false
 	}
 	if len(repository.Authors) > 0 && !slices.Contains(repository.Authors, pr.Author.Login) {
+		return false
+	}
+	return true
+}
+
+func Automatic(repository config.RepositoryConfig, pr gh.PullRequest, marker, reviewer, trigger string) bool {
+	if !Candidate(repository, pr, marker, reviewer) {
+		return false
+	}
+	if trigger == config.TriggerAlways {
+		return true
+	}
+	if trigger == config.TriggerManual {
 		return false
 	}
 	for _, request := range pr.ReviewRequests {

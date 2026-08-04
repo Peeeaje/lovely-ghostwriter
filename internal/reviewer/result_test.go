@@ -86,8 +86,15 @@ func TestRecoveredReviewPostedUsesPreviousRunMarker(t *testing.T) {
 	runner := Runner{Config: cfg, GitHub: fakeGitHub{pr: gh.PullRequest{
 		Reviews: []gh.Review{{Author: gh.Actor{Login: "reviewer"}, Body: "<!-- codex-auto-review reviewer=reviewer head=head run=41 -->"}},
 	}}}
-	posted, err := runner.RecoveredReviewPosted(context.Background(), state.PullRequest{HeadSHA: "head", RecoveryRunID: 41})
+	posted, err := runner.RecoveredReviewPosted(context.Background(), cfg.Repositories[0], state.PullRequest{HeadSHA: "head", RecoveryRunID: 41})
 	if err != nil || !posted {
 		t.Fatalf("RecoveredReviewPosted() posted=%v err=%v", posted, err)
+	}
+}
+
+func TestPromptIncludesAdditionalInstructions(t *testing.T) {
+	prompt := Prompt(config.ReviewConfig{Instructions: "Prioritize API compatibility."}, state.PullRequest{}, "/tmp/worktree", "/tmp/artifacts")
+	if !strings.Contains(prompt, "Prioritize API compatibility.") {
+		t.Fatalf("Prompt() = %s", prompt)
 	}
 }
