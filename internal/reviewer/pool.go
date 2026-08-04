@@ -2,6 +2,7 @@ package reviewer
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"sync"
@@ -11,12 +12,14 @@ import (
 )
 
 type Pool struct {
-	config config.Config
-	store  *state.Store
-	runner *Runner
-	output io.Writer
-	sem    chan struct{}
-	wg     sync.WaitGroup
+	config  config.Config
+	store   *state.Store
+	runner  *Runner
+	output  io.Writer
+	sem     chan struct{}
+	wg      sync.WaitGroup
+	errorMu sync.Mutex
+	errors  []error
 }
 
 func NewPool(cfg config.Config, store *state.Store, runner *Runner, output io.Writer) *Pool {
@@ -57,10 +60,12 @@ func (p *Pool) StartAvailable(ctx context.Context) (int, error) {
 			}()
 			status, runErr := p.runner.Run(ctx, repository, pr, run)
 			if err := p.store.FinishRun(context.Background(), run, status, runErr); err != nil {
+				p.recordError(err)
 				fmt.Fprintf(p.output, "failed to persist %s#%d run=%d: %v\n", pr.Repository, pr.Number, run.ID, err)
 				return
 			}
 			if runErr != nil {
+				p.recordError(runErr)
 				fmt.Fprintf(p.output, "failed %s#%d run=%d: %v\n", pr.Repository, pr.Number, run.ID, runErr)
 				return
 			}
@@ -82,9 +87,23 @@ func (p *Pool) Drain(ctx context.Context) error {
 		}
 		p.Wait()
 		if started == 0 {
-			return nil
+			return errors.Join(p.takeErrors()...)
 		}
 	}
+}
+
+func (p *Pool) recordError(err error) {
+	p.errorMu.Lock()
+	defer p.errorMu.Unlock()
+	p.errors = append(p.errors, err)
+}
+
+func (p *Pool) takeErrors() []error {
+	p.errorMu.Lock()
+	defer p.errorMu.Unlock()
+	errs := p.errors
+	p.errors = nil
+	return errs
 }
 
 func (p *Pool) repository(name string) (config.RepositoryConfig, bool) {

@@ -28,9 +28,9 @@ func (f *fakeStore) UpsertPullRequest(_ context.Context, pr state.PullRequest) (
 
 func TestScanFiltersAndClassifiesPullRequests(t *testing.T) {
 	source := fakeSource{prs: []gh.PullRequest{
-		{Number: 1, State: "OPEN", HeadSHA: "one", BaseBranch: "main", Author: gh.Actor{Login: "alice"}, ReviewRequests: []gh.ReviewRequest{{Login: "reviewer"}}},
-		{Number: 2, State: "OPEN", HeadSHA: "two", BaseBranch: "release", Author: gh.Actor{Login: "alice"}, ReviewRequests: []gh.ReviewRequest{{Login: "reviewer"}}},
-		{Number: 3, State: "OPEN", HeadSHA: "three", BaseBranch: "main", Author: gh.Actor{Login: "bot"}, ReviewRequests: []gh.ReviewRequest{{Login: "reviewer"}}},
+		{Number: 1, State: "OPEN", HeadSHA: "one", BaseBranch: "main", BaseSHA: "base", Author: gh.Actor{Login: "alice"}, ReviewRequests: []gh.ReviewRequest{{Login: "reviewer"}}},
+		{Number: 2, State: "OPEN", HeadSHA: "two", BaseBranch: "release", BaseSHA: "release-base", Author: gh.Actor{Login: "alice"}, ReviewRequests: []gh.ReviewRequest{{Login: "reviewer"}}},
+		{Number: 3, State: "OPEN", HeadSHA: "three", BaseBranch: "main", BaseSHA: "base", Author: gh.Actor{Login: "bot"}, ReviewRequests: []gh.ReviewRequest{{Login: "reviewer"}}},
 	}}
 	store := &fakeStore{}
 	cfg := config.Default()

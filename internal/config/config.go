@@ -54,7 +54,7 @@ func Default() Config {
 			Command:         "codex",
 			Model:           "gpt-5.6-sol",
 			ReasoningEffort: "high",
-			Sandbox:         "danger-full-access",
+			Sandbox:         "workspace-write",
 			Marker:          "codex-auto-review",
 			PostReviews:     false,
 		},

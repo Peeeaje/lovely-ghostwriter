@@ -22,7 +22,7 @@ type Manager struct {
 	Root string
 }
 
-func (m Manager) Prepare(ctx context.Context, sourcePath, repository string, number int, headSHA string, runID int64) (string, error) {
+func (m Manager) Prepare(ctx context.Context, sourcePath, repository string, number int, baseBranch, baseSHA, headSHA string, runID int64) (string, error) {
 	if err := os.MkdirAll(m.Root, 0o755); err != nil {
 		return "", fmt.Errorf("create worktree root: %w", err)
 	}
@@ -33,6 +33,19 @@ func (m Manager) Prepare(ctx context.Context, sourcePath, repository string, num
 	slug := strings.NewReplacer("/", "-", "\\", "-").Replace(repository)
 	path := filepath.Join(m.Root, fmt.Sprintf("%s-%d-%s-run%d", slug, number, shortHead, runID))
 
+	if baseSHA == "" {
+		return "", fmt.Errorf("pull request base SHA is missing")
+	}
+	if output, err := command(ctx, sourcePath, "fetch", "--no-tags", "origin", "refs/heads/"+baseBranch); err != nil {
+		return "", fmt.Errorf("fetch base branch: %s: %w", output, err)
+	}
+	fetchedBase, err := command(ctx, sourcePath, "rev-parse", "FETCH_HEAD")
+	if err != nil {
+		return "", fmt.Errorf("resolve fetched base: %w", err)
+	}
+	if strings.TrimSpace(fetchedBase) != baseSHA {
+		return "", fmt.Errorf("pull request base changed from %s to %s", baseSHA, strings.TrimSpace(fetchedBase))
+	}
 	if output, err := command(ctx, sourcePath, "fetch", "--no-tags", "origin", fmt.Sprintf("pull/%d/head", number)); err != nil {
 		return "", fmt.Errorf("fetch pull request: %s: %w", output, err)
 	}

@@ -285,6 +285,7 @@ func enqueue(ctx context.Context, opts options, args []string, out io.Writer) er
 		URL:        pr.URL,
 		Author:     pr.Author.Login,
 		BaseBranch: pr.BaseBranch,
+		BaseSHA:    pr.BaseSHA,
 		Status:     state.StatusQueued,
 	}, force)
 	if err != nil {
@@ -327,7 +328,6 @@ func reviewPool(cfg config.Config, store *state.Store, opts options, out io.Writ
 		GitHub:       client,
 		Worktrees:    worktree.Manager{Root: filepath.Join(root, "worktrees")},
 		ArtifactRoot: filepath.Join(root, "runs"),
-		Output:       out,
 	}
 	return reviewer.NewPool(cfg, store, runner, out)
 }

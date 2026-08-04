@@ -58,6 +58,7 @@ func (s *Scanner) Scan(ctx context.Context, cfg config.Config) (Result, error) {
 				URL:        pr.URL,
 				Author:     pr.Author.Login,
 				BaseBranch: pr.BaseBranch,
+				BaseSHA:    pr.BaseSHA,
 				Status:     status,
 			})
 			if err != nil {

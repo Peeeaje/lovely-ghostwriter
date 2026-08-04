@@ -21,6 +21,7 @@ func TestUpsertPullRequestIsIdempotent(t *testing.T) {
 		URL:        "https://github.com/owner/repository/pull/42",
 		Author:     "alice",
 		BaseBranch: "main",
+		BaseSHA:    "base123",
 		Status:     StatusQueued,
 	}
 
@@ -57,6 +58,7 @@ func TestClaimAndFinishRun(t *testing.T) {
 		URL:        "https://github.com/owner/repository/pull/42",
 		Author:     "alice",
 		BaseBranch: "main",
+		BaseSHA:    "base123",
 		Status:     StatusQueued,
 	}
 	if _, err := store.UpsertPullRequest(context.Background(), pr); err != nil {

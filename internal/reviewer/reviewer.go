@@ -2,9 +2,8 @@ package reviewer
 
 import (
 	"context"
-	"errors"
+	"encoding/json"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -20,6 +19,7 @@ import (
 type GitHubClient interface {
 	CurrentUser(context.Context) (string, error)
 	PullRequest(context.Context, string, int) (gh.PullRequest, error)
+	SubmitReview(context.Context, string, int, gh.ReviewSubmission) (gh.Review, error)
 }
 
 type Runner struct {
@@ -28,7 +28,6 @@ type Runner struct {
 	GitHub       GitHubClient
 	Worktrees    worktree.Manager
 	ArtifactRoot string
-	Output       io.Writer
 }
 
 func (r *Runner) Run(ctx context.Context, repository config.RepositoryConfig, pr state.PullRequest, run state.Run) (status state.Status, runErr error) {
@@ -43,7 +42,7 @@ func (r *Runner) Run(ctx context.Context, repository config.RepositoryConfig, pr
 		return status, fmt.Errorf("create artifact directory: %w", err)
 	}
 	logPath := filepath.Join(artifactPath, "review.log")
-	worktreePath, err := r.Worktrees.Prepare(ctx, sourcePath, pr.Repository, pr.Number, pr.HeadSHA, run.ID)
+	worktreePath, err := r.Worktrees.Prepare(ctx, sourcePath, pr.Repository, pr.Number, pr.BaseBranch, pr.BaseSHA, pr.HeadSHA, run.ID)
 	if err != nil {
 		_ = r.Store.SetRunPaths(ctx, run.ID, logPath, artifactPath, "")
 		return status, err
@@ -60,13 +59,28 @@ func (r *Runner) Run(ctx context.Context, repository config.RepositoryConfig, pr
 		}
 	}()
 
-	reviewer, err := r.GitHub.CurrentUser(ctx)
+	current, err := r.GitHub.PullRequest(ctx, pr.Repository, pr.Number)
 	if err != nil {
 		return status, err
 	}
-	prompt := Prompt(r.Config, pr, worktreePath, artifactPath, reviewer)
+	if err := currentTarget(current, pr); err != nil {
+		return status, err
+	}
+	contextData, err := json.MarshalIndent(current, "", "  ")
+	if err != nil {
+		return status, fmt.Errorf("encode pull request context: %w", err)
+	}
+	if err := os.WriteFile(filepath.Join(artifactPath, "pr-context.json"), contextData, 0o644); err != nil {
+		return status, fmt.Errorf("write pull request context: %w", err)
+	}
+
+	prompt := Prompt(r.Config, pr, worktreePath, artifactPath)
 	if err := os.WriteFile(filepath.Join(artifactPath, "prompt.md"), []byte(prompt+"\n"), 0o644); err != nil {
 		return status, fmt.Errorf("write prompt: %w", err)
+	}
+	schemaPath := filepath.Join(artifactPath, "review-result.schema.json")
+	if err := os.WriteFile(schemaPath, outputSchema(), 0o644); err != nil {
+		return status, fmt.Errorf("write output schema: %w", err)
 	}
 
 	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
@@ -75,11 +89,14 @@ func (r *Runner) Run(ctx context.Context, repository config.RepositoryConfig, pr
 	}
 	defer logFile.Close()
 
+	resultPath := filepath.Join(artifactPath, "result.json")
 	args := []string{
 		"exec", "--ephemeral",
 		"-C", worktreePath,
+		"--add-dir", artifactPath,
 		"--sandbox", r.Config.Review.Sandbox,
-		"--output-last-message", filepath.Join(artifactPath, "final.md"),
+		"--output-schema", schemaPath,
+		"--output-last-message", resultPath,
 	}
 	if r.Config.Review.ReasoningEffort != "" {
 		args = append(args, "-c", "model_reasoning_effort="+strconv.Quote(r.Config.Review.ReasoningEffort))
@@ -93,26 +110,56 @@ func (r *Runner) Run(ctx context.Context, repository config.RepositoryConfig, pr
 	command := exec.CommandContext(ctx, r.Config.Review.Command, args...)
 	command.Dir = worktreePath
 	command.Stdin = strings.NewReader(prompt)
-	command.Stdout = io.MultiWriter(logFile, r.Output)
-	command.Stderr = io.MultiWriter(logFile, r.Output)
-	commandErr := command.Run()
-
+	command.Stdout = logFile
+	command.Stderr = logFile
+	if err := command.Run(); err != nil {
+		return status, fmt.Errorf("Codex review failed: %w", err)
+	}
+	resultData, err := os.ReadFile(resultPath)
+	if err != nil {
+		return status, fmt.Errorf("read Codex review result: %w", err)
+	}
+	result, err := readResult(resultData)
+	if err != nil {
+		return status, err
+	}
 	if !r.Config.Review.PostReviews {
-		if commandErr != nil {
-			return status, fmt.Errorf("Codex review failed: %w", commandErr)
-		}
 		return state.StatusCompleted, nil
 	}
 
-	current, markerErr := r.GitHub.PullRequest(ctx, pr.Repository, pr.Number)
-	if markerErr != nil {
-		return status, markerErr
+	current, err = r.GitHub.PullRequest(ctx, pr.Repository, pr.Number)
+	if err != nil {
+		return status, err
 	}
-	if gh.HasMarker(current, r.Config.Review.Marker, pr.HeadSHA) {
-		return state.StatusReviewed, nil
+	if err := currentTarget(current, pr); err != nil {
+		return status, err
 	}
-	if commandErr != nil {
-		return status, fmt.Errorf("Codex review failed and no review marker was found: %w", commandErr)
+	reviewer, err := r.GitHub.CurrentUser(ctx)
+	if err != nil {
+		return status, err
 	}
-	return status, errors.New("Codex finished without posting the expected review marker")
+	if _, err := r.GitHub.SubmitReview(ctx, pr.Repository, pr.Number, submission(result, r.Config.Review.Marker, reviewer, pr, run.ID)); err != nil {
+		return status, err
+	}
+	posted, err := r.GitHub.PullRequest(ctx, pr.Repository, pr.Number)
+	if err != nil {
+		return status, err
+	}
+	if !gh.HasRunMarker(posted, r.Config.Review.Marker, pr.HeadSHA, run.ID) {
+		return status, fmt.Errorf("submitted review marker was not found for run %d", run.ID)
+	}
+	return state.StatusReviewed, nil
+}
+
+func currentTarget(current gh.PullRequest, target state.PullRequest) error {
+	if current.State != "OPEN" {
+		return fmt.Errorf("pull request is no longer open")
+	}
+	if current.HeadSHA != target.HeadSHA {
+		return fmt.Errorf("pull request head changed from %s to %s", target.HeadSHA, current.HeadSHA)
+	}
+	if current.BaseSHA != target.BaseSHA {
+		return fmt.Errorf("pull request base changed from %s to %s", target.BaseSHA, current.BaseSHA)
+	}
+	return nil
 }
