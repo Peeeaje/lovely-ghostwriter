@@ -1,0 +1,13 @@
+package github
+
+import "testing"
+
+func TestHasMarker(t *testing.T) {
+	pr := PullRequest{Reviews: []Review{{Body: "review\n<!-- codex-auto-review reviewer=alice head=abc123 -->"}}}
+	if !HasMarker(pr, "codex-auto-review", "abc123") {
+		t.Fatal("HasMarker() = false, want true")
+	}
+	if HasMarker(pr, "codex-auto-review", "different") {
+		t.Fatal("HasMarker() matched a different head")
+	}
+}

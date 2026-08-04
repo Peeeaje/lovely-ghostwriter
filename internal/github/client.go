@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"os/exec"
+	"strconv"
+	"strings"
 )
 
 type PullRequest struct {
@@ -18,6 +20,7 @@ type PullRequest struct {
 	State          string          `json:"state"`
 	Author         Actor           `json:"author"`
 	ReviewRequests []ReviewRequest `json:"reviewRequests"`
+	Reviews        []Review        `json:"reviews"`
 }
 
 type Actor struct {
@@ -28,6 +31,10 @@ type ReviewRequest struct {
 	Login string `json:"login"`
 	Slug  string `json:"slug"`
 	Name  string `json:"name"`
+}
+
+type Review struct {
+	Body string `json:"body"`
 }
 
 type CommandRunner interface {
@@ -61,7 +68,7 @@ func (c *Client) OpenPullRequests(ctx context.Context, repository string) ([]Pul
 		"--repo", repository,
 		"--state", "open",
 		"--limit", "100",
-		"--json", "number,title,url,headRefOid,headRefName,baseRefName,isDraft,state,author,reviewRequests",
+		"--json", "number,title,url,headRefOid,headRefName,baseRefName,isDraft,state,author,reviewRequests,reviews",
 	)
 	if err != nil {
 		return nil, fmt.Errorf("list pull requests for %s: %w", repository, err)
@@ -79,9 +86,32 @@ func (c *Client) CurrentUser(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("resolve GitHub user: %w", err)
 	}
-	var login string
-	if err := json.Unmarshal(output, &login); err == nil {
-		return login, nil
+	return strings.TrimSpace(string(output)), nil
+}
+
+func (c *Client) PullRequest(ctx context.Context, repository string, number int) (PullRequest, error) {
+	output, err := c.runner.Output(ctx, "gh", "pr", "view", strconv.Itoa(number),
+		"--repo", repository,
+		"--json", "number,title,url,headRefOid,headRefName,baseRefName,isDraft,state,author,reviewRequests,reviews",
+	)
+	if err != nil {
+		return PullRequest{}, fmt.Errorf("view pull request %s#%d: %w", repository, number, err)
 	}
-	return string(output), nil
+
+	var pr PullRequest
+	if err := json.Unmarshal(output, &pr); err != nil {
+		return PullRequest{}, fmt.Errorf("decode pull request %s#%d: %w", repository, number, err)
+	}
+	return pr, nil
+}
+
+func HasMarker(pr PullRequest, marker, headSHA string) bool {
+	markerPrefix := "<!-- " + marker + " "
+	headAttribute := "head=" + headSHA
+	for _, review := range pr.Reviews {
+		if strings.Contains(review.Body, markerPrefix) && strings.Contains(review.Body, headAttribute) {
+			return true
+		}
+	}
+	return false
 }

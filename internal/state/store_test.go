@@ -41,3 +41,47 @@ func TestUpsertPullRequestIsIdempotent(t *testing.T) {
 		t.Fatalf("queued count = %d, want 1", counts[StatusQueued])
 	}
 }
+
+func TestClaimAndFinishRun(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	pr := PullRequest{
+		Repository: "owner/repository",
+		Number:     42,
+		HeadSHA:    "abc123",
+		Title:      "Change something",
+		URL:        "https://github.com/owner/repository/pull/42",
+		Author:     "alice",
+		BaseBranch: "main",
+		Status:     StatusQueued,
+	}
+	if _, err := store.UpsertPullRequest(context.Background(), pr); err != nil {
+		t.Fatal(err)
+	}
+
+	claimed, run, ok, err := store.ClaimNext(context.Background())
+	if err != nil || !ok {
+		t.Fatalf("ClaimNext() ok=%v err=%v", ok, err)
+	}
+	if claimed.Status != StatusRunning || run.Attempt != 1 {
+		t.Fatalf("ClaimNext() pr=%+v run=%+v", claimed, run)
+	}
+	if _, _, ok, err := store.ClaimNext(context.Background()); err != nil || ok {
+		t.Fatalf("second ClaimNext() ok=%v err=%v", ok, err)
+	}
+	if err := store.FinishRun(context.Background(), run, StatusCompleted, nil); err != nil {
+		t.Fatal(err)
+	}
+
+	counts, err := store.Counts(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if counts[StatusCompleted] != 1 {
+		t.Fatalf("completed count = %d, want 1", counts[StatusCompleted])
+	}
+}

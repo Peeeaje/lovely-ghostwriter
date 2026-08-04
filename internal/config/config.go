@@ -24,9 +24,13 @@ type DaemonConfig struct {
 }
 
 type ReviewConfig struct {
-	Command         string `toml:"command"`
-	Model           string `toml:"model"`
-	ReasoningEffort string `toml:"reasoning_effort"`
+	Command         string   `toml:"command"`
+	Model           string   `toml:"model"`
+	ReasoningEffort string   `toml:"reasoning_effort"`
+	Sandbox         string   `toml:"sandbox"`
+	Marker          string   `toml:"marker"`
+	PostReviews     bool     `toml:"post_reviews"`
+	ExtraArgs       []string `toml:"extra_args"`
 }
 
 type RepositoryConfig struct {
@@ -50,6 +54,9 @@ func Default() Config {
 			Command:         "codex",
 			Model:           "gpt-5.6-sol",
 			ReasoningEffort: "high",
+			Sandbox:         "danger-full-access",
+			Marker:          "codex-auto-review",
+			PostReviews:     false,
 		},
 		Repositories: []RepositoryConfig{{
 			Name:           "owner/repository",
@@ -118,6 +125,12 @@ func (c Config) Validate() error {
 	}
 	if strings.TrimSpace(c.Review.Command) == "" {
 		return errors.New("review.command is required")
+	}
+	if !slices.Contains([]string{"read-only", "workspace-write", "danger-full-access"}, c.Review.Sandbox) {
+		return errors.New("review.sandbox must be read-only, workspace-write, or danger-full-access")
+	}
+	if strings.TrimSpace(c.Review.Marker) == "" {
+		return errors.New("review.marker is required")
 	}
 	if len(c.Repositories) == 0 {
 		return errors.New("at least one [[repository]] is required")

@@ -41,7 +41,7 @@ func (s *Scanner) Scan(ctx context.Context, cfg config.Config) (Result, error) {
 			return result, err
 		}
 		for _, pr := range prs {
-			if !eligible(repository, pr) {
+			if gh.HasMarker(pr, cfg.Review.Marker, pr.HeadSHA) || !eligible(repository, pr) {
 				result.Skipped++
 				continue
 			}
