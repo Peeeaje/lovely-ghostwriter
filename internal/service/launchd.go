@@ -21,8 +21,26 @@ func Install(plistPath, executable, configPath, logPath string) error {
 	if err := os.MkdirAll(filepath.Dir(logPath), 0o755); err != nil {
 		return fmt.Errorf("create log directory: %w", err)
 	}
+	commandPath := os.Getenv("PATH")
+	if commandPath == "" {
+		return fmt.Errorf("PATH is empty")
+	}
 
-	plist := fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
+	plist := launchAgentPlist(executable, configPath, logPath, commandPath)
+	if err := os.WriteFile(plistPath, []byte(plist), 0o644); err != nil {
+		return fmt.Errorf("write launch agent: %w", err)
+	}
+
+	target := fmt.Sprintf("gui/%d", os.Getuid())
+	_ = exec.Command("launchctl", "bootout", target, plistPath).Run()
+	if output, err := exec.Command("launchctl", "bootstrap", target, plistPath).CombinedOutput(); err != nil {
+		return fmt.Errorf("load launch agent: %s: %w", strings.TrimSpace(string(output)), err)
+	}
+	return nil
+}
+
+func launchAgentPlist(executable, configPath, logPath, commandPath string) string {
+	return fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
@@ -41,23 +59,18 @@ func Install(plistPath, executable, configPath, logPath string) error {
   <true/>
   <key>ThrottleInterval</key>
   <integer>10</integer>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>%s</string>
+  </dict>
   <key>StandardOutPath</key>
   <string>%s</string>
   <key>StandardErrorPath</key>
   <string>%s</string>
 </dict>
 </plist>
-`, Label, xmlEscape(executable), xmlEscape(configPath), xmlEscape(logPath), xmlEscape(logPath))
-	if err := os.WriteFile(plistPath, []byte(plist), 0o644); err != nil {
-		return fmt.Errorf("write launch agent: %w", err)
-	}
-
-	target := fmt.Sprintf("gui/%d", os.Getuid())
-	_ = exec.Command("launchctl", "bootout", target, plistPath).Run()
-	if output, err := exec.Command("launchctl", "bootstrap", target, plistPath).CombinedOutput(); err != nil {
-		return fmt.Errorf("load launch agent: %s: %w", strings.TrimSpace(string(output)), err)
-	}
-	return nil
+`, Label, xmlEscape(executable), xmlEscape(configPath), xmlEscape(commandPath), xmlEscape(logPath), xmlEscape(logPath))
 }
 
 func Uninstall(plistPath string) error {
