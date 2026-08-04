@@ -374,6 +374,7 @@ INSERT OR IGNORE INTO pull_requests (
 UPDATE pull_requests
 SET title = ?, url = ?, author = ?,
     status = CASE
+      WHEN manual = 0 AND ? = 0 AND status IN ('detected', 'canceled') AND ? = 'queued' THEN ?
       WHEN manual = 0 AND (base_sha <> ? OR base_branch <> ?) AND status IN ('detected', 'canceled', 'failed', 'completed', 'reviewed') THEN ?
       ELSE status
     END,
@@ -381,11 +382,22 @@ SET title = ?, url = ?, author = ?,
     base_sha = CASE WHEN status = 'running' THEN base_sha ELSE ? END,
     updated_at = ?
 WHERE repository = ? AND number = ? AND head_sha = ?
-`, pr.Title, pr.URL, pr.Author, pr.BaseSHA, pr.BaseBranch, pr.Status, pr.BaseBranch, pr.BaseSHA, now.Format(time.RFC3339), pr.Repository, pr.Number, pr.HeadSHA); err != nil {
+`, pr.Title, pr.URL, pr.Author, pr.Manual, pr.Status, pr.Status, pr.BaseSHA, pr.BaseBranch, pr.Status, pr.BaseBranch, pr.BaseSHA, now.Format(time.RFC3339), pr.Repository, pr.Number, pr.HeadSHA); err != nil {
 			return false, fmt.Errorf("update pull request %s#%d: %w", pr.Repository, pr.Number, err)
 		}
 	}
 	return rows == 1, nil
+}
+
+func (s *Store) MarkReviewed(ctx context.Context, repository string, number int, headSHA string) error {
+	_, err := s.db.ExecContext(ctx, `
+UPDATE pull_requests SET status = 'reviewed', updated_at = ?
+WHERE repository = ? AND number = ? AND head_sha = ? AND status = 'failed'
+`, time.Now().UTC().Truncate(time.Second).Format(time.RFC3339), repository, number, headSHA)
+	if err != nil {
+		return fmt.Errorf("reconcile reviewed pull request: %w", err)
+	}
+	return nil
 }
 
 func (s *Store) Counts(ctx context.Context) (map[Status]int, error) {

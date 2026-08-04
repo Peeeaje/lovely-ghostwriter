@@ -2,6 +2,7 @@ package state
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"testing"
 )
@@ -229,6 +230,65 @@ func TestUpsertQueuesDetectedPullRequestWhenBaseBecomesEligible(t *testing.T) {
 	queued, _, ok, err := store.ClaimNext(context.Background())
 	if err != nil || !ok || queued.BaseBranch != "main" || queued.BaseSHA != "main-base" {
 		t.Fatalf("ClaimNext() pr=%+v ok=%v err=%v", queued, ok, err)
+	}
+}
+
+func TestUpsertRequeuesCanceledPullRequestWhenEligibleAgain(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	pr := PullRequest{
+		Repository: "owner/repository", Number: 42, HeadSHA: "head", Title: "Change",
+		URL: "https://github.com/owner/repository/pull/42", Author: "alice",
+		BaseBranch: "main", BaseSHA: "base", Status: StatusQueued,
+	}
+	if _, err := store.UpsertPullRequest(context.Background(), pr); err != nil {
+		t.Fatal(err)
+	}
+	_, run, ok, err := store.ClaimNext(context.Background())
+	if err != nil || !ok {
+		t.Fatalf("ClaimNext() ok=%v err=%v", ok, err)
+	}
+	if err := store.FinishRun(context.Background(), run, StatusCanceled, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.UpsertPullRequest(context.Background(), pr); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, ok, err := store.ClaimNext(context.Background()); err != nil || !ok {
+		t.Fatalf("requeued ClaimNext() ok=%v err=%v", ok, err)
+	}
+}
+
+func TestMarkReviewedReconcilesFailedPullRequest(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	pr := PullRequest{
+		Repository: "owner/repository", Number: 42, HeadSHA: "head", Title: "Change",
+		URL: "https://github.com/owner/repository/pull/42", Author: "alice",
+		BaseBranch: "main", BaseSHA: "base", Status: StatusQueued,
+	}
+	if _, err := store.UpsertPullRequest(context.Background(), pr); err != nil {
+		t.Fatal(err)
+	}
+	_, run, _, err := store.ClaimNext(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.FinishRun(context.Background(), run, StatusFailed, errors.New("confirmation failed")); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.MarkReviewed(context.Background(), pr.Repository, pr.Number, pr.HeadSHA); err != nil {
+		t.Fatal(err)
+	}
+	counts, err := store.Counts(context.Background())
+	if err != nil || counts[StatusReviewed] != 1 || counts[StatusFailed] != 0 {
+		t.Fatalf("Counts() = %v err=%v", counts, err)
 	}
 }
 

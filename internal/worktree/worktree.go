@@ -45,7 +45,7 @@ func (m Manager) Prepare(ctx context.Context, sourcePath, repository string, num
 	if baseSHA == "" {
 		return "", fmt.Errorf("pull request base SHA is missing")
 	}
-	if output, err := command(ctx, sourcePath, "fetch", "--no-tags", "origin", "refs/heads/"+baseBranch+":"+baseRef); err != nil {
+	if output, err := command(ctx, sourcePath, "fetch", "--no-write-fetch-head", "--no-tags", "origin", "refs/heads/"+baseBranch+":"+baseRef); err != nil {
 		return "", fmt.Errorf("fetch base branch: %s: %w", output, err)
 	}
 	fetchedBase, err := command(ctx, sourcePath, "rev-parse", baseRef)
@@ -55,7 +55,7 @@ func (m Manager) Prepare(ctx context.Context, sourcePath, repository string, num
 	if strings.TrimSpace(fetchedBase) != baseSHA {
 		return "", fmt.Errorf("pull request base changed from %s to %s", baseSHA, strings.TrimSpace(fetchedBase))
 	}
-	if output, err := command(ctx, sourcePath, "fetch", "--no-tags", "origin", fmt.Sprintf("pull/%d/head:%s", number, headRef)); err != nil {
+	if output, err := command(ctx, sourcePath, "fetch", "--no-write-fetch-head", "--no-tags", "origin", fmt.Sprintf("pull/%d/head:%s", number, headRef)); err != nil {
 		return "", fmt.Errorf("fetch pull request: %s: %w", output, err)
 	}
 	current, err := command(ctx, sourcePath, "rev-parse", headRef)

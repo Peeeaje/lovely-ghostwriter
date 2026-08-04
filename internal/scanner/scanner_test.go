@@ -22,7 +22,13 @@ func (f fakeSource) CurrentUser(context.Context) (string, error) {
 }
 
 type fakeStore struct {
-	prs []state.PullRequest
+	prs      []state.PullRequest
+	reviewed []int
+}
+
+func (f *fakeStore) MarkReviewed(_ context.Context, _ string, number int, _ string) error {
+	f.reviewed = append(f.reviewed, number)
+	return nil
 }
 
 func (f *fakeStore) UpsertPullRequest(_ context.Context, pr state.PullRequest) (bool, error) {
@@ -35,6 +41,7 @@ func TestScanFiltersAndClassifiesPullRequests(t *testing.T) {
 		{Number: 1, State: "OPEN", HeadSHA: "one", BaseBranch: "main", BaseSHA: "base", Author: gh.Actor{Login: "alice"}, ReviewRequests: []gh.ReviewRequest{{Login: "reviewer"}}},
 		{Number: 2, State: "OPEN", HeadSHA: "two", BaseBranch: "release", BaseSHA: "release-base", Author: gh.Actor{Login: "alice"}, ReviewRequests: []gh.ReviewRequest{{Login: "reviewer"}}},
 		{Number: 3, State: "OPEN", HeadSHA: "three", BaseBranch: "main", BaseSHA: "base", Author: gh.Actor{Login: "bot"}, ReviewRequests: []gh.ReviewRequest{{Login: "reviewer"}}},
+		{Number: 4, State: "OPEN", HeadSHA: "four", BaseBranch: "main", BaseSHA: "base", Author: gh.Actor{Login: "alice"}, Reviews: []gh.Review{{Author: gh.Actor{Login: "reviewer"}, Body: "<!-- codex-auto-review head=four -->"}}},
 	}}
 	store := &fakeStore{}
 	cfg := config.Default()
@@ -51,10 +58,13 @@ func TestScanFiltersAndClassifiesPullRequests(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Queued != 1 || result.Detected != 1 || result.Skipped != 1 {
+	if result.Queued != 1 || result.Detected != 1 || result.Skipped != 2 {
 		t.Fatalf("Scan() = %+v", result)
 	}
 	if store.prs[0].Status != state.StatusQueued || store.prs[1].Status != state.StatusDetected {
 		t.Fatalf("stored statuses = %q, %q", store.prs[0].Status, store.prs[1].Status)
+	}
+	if len(store.reviewed) != 1 || store.reviewed[0] != 4 {
+		t.Fatalf("reviewed = %v", store.reviewed)
 	}
 }
