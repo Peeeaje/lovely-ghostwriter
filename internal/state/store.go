@@ -33,6 +33,7 @@ type PullRequest struct {
 	Author     string
 	BaseBranch string
 	BaseSHA    string
+	Manual     bool
 	Status     Status
 	DetectedAt time.Time
 	UpdatedAt  time.Time
@@ -93,6 +94,7 @@ CREATE TABLE IF NOT EXISTS pull_requests (
   author TEXT NOT NULL,
   base_branch TEXT NOT NULL,
   base_sha TEXT NOT NULL DEFAULT '',
+  manual INTEGER NOT NULL DEFAULT 0,
   status TEXT NOT NULL,
   detected_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
@@ -124,6 +126,9 @@ CREATE INDEX IF NOT EXISTS runs_status_idx ON runs(status, started_at DESC);
 		return fmt.Errorf("migrate state database: %w", err)
 	}
 	if err := s.ensureColumn(ctx, "pull_requests", "base_sha", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
+	if err := s.ensureColumn(ctx, "pull_requests", "manual", "INTEGER NOT NULL DEFAULT 0"); err != nil {
 		return err
 	}
 	return nil
@@ -167,12 +172,12 @@ func (s *Store) ClaimNext(ctx context.Context) (PullRequest, Run, bool, error) {
 	var pr PullRequest
 	var detectedAt, updatedAt string
 	err = tx.QueryRowContext(ctx, `
-SELECT repository, number, head_sha, title, url, author, base_branch, base_sha, status, detected_at, updated_at
+SELECT repository, number, head_sha, title, url, author, base_branch, base_sha, manual, status, detected_at, updated_at
 FROM pull_requests
 WHERE status = 'queued'
 ORDER BY detected_at, repository, number
 LIMIT 1
-`).Scan(&pr.Repository, &pr.Number, &pr.HeadSHA, &pr.Title, &pr.URL, &pr.Author, &pr.BaseBranch, &pr.BaseSHA, &pr.Status, &detectedAt, &updatedAt)
+`).Scan(&pr.Repository, &pr.Number, &pr.HeadSHA, &pr.Title, &pr.URL, &pr.Author, &pr.BaseBranch, &pr.BaseSHA, &pr.Manual, &pr.Status, &detectedAt, &updatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return PullRequest{}, Run{}, false, nil
 	}
@@ -284,9 +289,9 @@ func (s *Store) UpsertPullRequest(ctx context.Context, pr PullRequest) (bool, er
 	now := time.Now().UTC().Truncate(time.Second)
 	result, err := s.db.ExecContext(ctx, `
 INSERT OR IGNORE INTO pull_requests (
-  repository, number, head_sha, title, url, author, base_branch, base_sha, status, detected_at, updated_at
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-`, pr.Repository, pr.Number, pr.HeadSHA, pr.Title, pr.URL, pr.Author, pr.BaseBranch, pr.BaseSHA, pr.Status, now.Format(time.RFC3339), now.Format(time.RFC3339))
+  repository, number, head_sha, title, url, author, base_branch, base_sha, manual, status, detected_at, updated_at
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+`, pr.Repository, pr.Number, pr.HeadSHA, pr.Title, pr.URL, pr.Author, pr.BaseBranch, pr.BaseSHA, pr.Manual, pr.Status, now.Format(time.RFC3339), now.Format(time.RFC3339))
 	if err != nil {
 		return false, fmt.Errorf("insert pull request %s#%d: %w", pr.Repository, pr.Number, err)
 	}
@@ -297,9 +302,10 @@ INSERT OR IGNORE INTO pull_requests (
 	if rows == 0 {
 		if _, err := s.db.ExecContext(ctx, `
 UPDATE pull_requests
-SET title = ?, url = ?, author = ?, base_branch = ?, base_sha = ?, updated_at = ?
+SET title = ?, url = ?, author = ?, base_branch = ?, base_sha = ?,
+    manual = CASE WHEN ? THEN 1 ELSE manual END, updated_at = ?
 WHERE repository = ? AND number = ? AND head_sha = ?
-`, pr.Title, pr.URL, pr.Author, pr.BaseBranch, pr.BaseSHA, now.Format(time.RFC3339), pr.Repository, pr.Number, pr.HeadSHA); err != nil {
+`, pr.Title, pr.URL, pr.Author, pr.BaseBranch, pr.BaseSHA, pr.Manual, now.Format(time.RFC3339), pr.Repository, pr.Number, pr.HeadSHA); err != nil {
 			return false, fmt.Errorf("update pull request %s#%d: %w", pr.Repository, pr.Number, err)
 		}
 	}
@@ -327,7 +333,7 @@ func (s *Store) Counts(ctx context.Context) (map[Status]int, error) {
 
 func (s *Store) Active(ctx context.Context) ([]PullRequest, error) {
 	rows, err := s.db.QueryContext(ctx, `
-SELECT repository, number, head_sha, title, url, author, base_branch, base_sha, status, detected_at, updated_at
+SELECT repository, number, head_sha, title, url, author, base_branch, base_sha, manual, status, detected_at, updated_at
 FROM pull_requests
 WHERE status IN ('detected', 'queued', 'running', 'failed')
 ORDER BY updated_at DESC
@@ -341,7 +347,7 @@ ORDER BY updated_at DESC
 	for rows.Next() {
 		var pr PullRequest
 		var detectedAt, updatedAt string
-		if err := rows.Scan(&pr.Repository, &pr.Number, &pr.HeadSHA, &pr.Title, &pr.URL, &pr.Author, &pr.BaseBranch, &pr.BaseSHA, &pr.Status, &detectedAt, &updatedAt); err != nil {
+		if err := rows.Scan(&pr.Repository, &pr.Number, &pr.HeadSHA, &pr.Title, &pr.URL, &pr.Author, &pr.BaseBranch, &pr.BaseSHA, &pr.Manual, &pr.Status, &detectedAt, &updatedAt); err != nil {
 			return nil, fmt.Errorf("scan pull request: %w", err)
 		}
 		pr.DetectedAt, _ = time.Parse(time.RFC3339, detectedAt)

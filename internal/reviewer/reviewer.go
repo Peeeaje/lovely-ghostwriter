@@ -12,6 +12,7 @@ import (
 
 	"github.com/Peeeaje/lovely-ghostwriter/internal/config"
 	gh "github.com/Peeeaje/lovely-ghostwriter/internal/github"
+	"github.com/Peeeaje/lovely-ghostwriter/internal/policy"
 	"github.com/Peeeaje/lovely-ghostwriter/internal/state"
 	"github.com/Peeeaje/lovely-ghostwriter/internal/worktree"
 )
@@ -28,6 +29,21 @@ type Runner struct {
 	GitHub       GitHubClient
 	Worktrees    worktree.Manager
 	ArtifactRoot string
+}
+
+func (r *Runner) EligibleAutomatic(ctx context.Context, repository config.RepositoryConfig, target state.PullRequest) (bool, error) {
+	current, err := r.GitHub.PullRequest(ctx, target.Repository, target.Number)
+	if err != nil {
+		return false, err
+	}
+	reviewer, err := r.GitHub.CurrentUser(ctx)
+	if err != nil {
+		return false, err
+	}
+	if current.HeadSHA != target.HeadSHA || current.BaseSHA != target.BaseSHA {
+		return false, nil
+	}
+	return policy.Automatic(repository, current, r.Config.Review.Marker, reviewer), nil
 }
 
 func (r *Runner) Run(ctx context.Context, repository config.RepositoryConfig, pr state.PullRequest, run state.Run) (status state.Status, runErr error) {
@@ -92,8 +108,9 @@ func (r *Runner) Run(ctx context.Context, repository config.RepositoryConfig, pr
 	resultPath := filepath.Join(artifactPath, "result.json")
 	args := []string{
 		"exec", "--ephemeral",
-		"-C", worktreePath,
-		"--add-dir", artifactPath,
+		"-C", artifactPath,
+		"--add-dir", worktreePath,
+		"--skip-git-repo-check",
 		"--sandbox", r.Config.Review.Sandbox,
 		"--output-schema", schemaPath,
 		"--output-last-message", resultPath,
@@ -108,7 +125,7 @@ func (r *Runner) Run(ctx context.Context, repository config.RepositoryConfig, pr
 	args = append(args, "-")
 
 	command := exec.CommandContext(ctx, r.Config.Review.Command, args...)
-	command.Dir = worktreePath
+	command.Dir = artifactPath
 	command.Stdin = strings.NewReader(prompt)
 	command.Stdout = logFile
 	command.Stderr = logFile

@@ -290,6 +290,7 @@ func enqueue(ctx context.Context, opts options, args []string, out io.Writer) er
 		Author:     pr.Author.Login,
 		BaseBranch: pr.BaseBranch,
 		BaseSHA:    pr.BaseSHA,
+		Manual:     true,
 		Status:     state.StatusQueued,
 	}, force)
 	if err != nil {

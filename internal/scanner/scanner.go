@@ -3,10 +3,10 @@ package scanner
 import (
 	"context"
 	"fmt"
-	"slices"
 
 	"github.com/Peeeaje/lovely-ghostwriter/internal/config"
 	gh "github.com/Peeeaje/lovely-ghostwriter/internal/github"
+	"github.com/Peeeaje/lovely-ghostwriter/internal/policy"
 	"github.com/Peeeaje/lovely-ghostwriter/internal/state"
 )
 
@@ -46,7 +46,7 @@ func (s *Scanner) Scan(ctx context.Context, cfg config.Config) (Result, error) {
 			return result, err
 		}
 		for _, pr := range prs {
-			if gh.HasMarker(pr, cfg.Review.Marker, pr.HeadSHA, reviewer) || !eligible(repository, pr) {
+			if !policy.Automatic(repository, pr, cfg.Review.Marker, reviewer) {
 				result.Skipped++
 				continue
 			}
@@ -80,24 +80,4 @@ func (s *Scanner) Scan(ctx context.Context, cfg config.Config) (Result, error) {
 		}
 	}
 	return result, nil
-}
-
-func eligible(repository config.RepositoryConfig, pr gh.PullRequest) bool {
-	if pr.State != "OPEN" || (pr.Draft && !repository.IncludeDrafts) {
-		return false
-	}
-	if slices.Contains(repository.ExcludeAuthors, pr.Author.Login) {
-		return false
-	}
-	if len(repository.Authors) > 0 && !slices.Contains(repository.Authors, pr.Author.Login) {
-		return false
-	}
-	for _, request := range pr.ReviewRequests {
-		if slices.Contains(repository.Reviewers, request.Login) ||
-			slices.Contains(repository.Teams, request.Slug) ||
-			slices.Contains(repository.Teams, request.Name) {
-			return true
-		}
-	}
-	return false
 }

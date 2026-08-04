@@ -48,6 +48,20 @@ func (p *Pool) StartAvailable(ctx context.Context) (int, error) {
 			_ = p.store.FinishRun(ctx, run, state.StatusFailed, err)
 			continue
 		}
+		if !pr.Manual {
+			eligible, err := p.runner.EligibleAutomatic(ctx, repository, pr)
+			if err != nil {
+				_ = p.store.FinishRun(ctx, run, state.StatusFailed, err)
+				p.recordError(err)
+				fmt.Fprintf(p.output, "failed to validate %s#%d run=%d: %v\n", pr.Repository, pr.Number, run.ID, err)
+				continue
+			}
+			if !eligible {
+				_ = p.store.FinishRun(ctx, run, state.StatusCanceled, nil)
+				fmt.Fprintf(p.output, "canceled stale automatic queue %s#%d run=%d\n", pr.Repository, pr.Number, run.ID)
+				continue
+			}
+		}
 
 		p.sem <- struct{}{}
 		p.wg.Add(1)

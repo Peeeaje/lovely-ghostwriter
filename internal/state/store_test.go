@@ -103,12 +103,13 @@ func TestEnqueuePromotesDetectedWithoutForce(t *testing.T) {
 		t.Fatal(err)
 	}
 	pr.Status = StatusQueued
+	pr.Manual = true
 	queued, err := store.Enqueue(context.Background(), pr, false)
 	if err != nil || !queued {
 		t.Fatalf("Enqueue() queued=%v err=%v", queued, err)
 	}
 	claimed, _, ok, err := store.ClaimNext(context.Background())
-	if err != nil || !ok || claimed.Number != 42 {
+	if err != nil || !ok || claimed.Number != 42 || !claimed.Manual {
 		t.Fatalf("ClaimNext() pr=%+v ok=%v err=%v", claimed, ok, err)
 	}
 }
