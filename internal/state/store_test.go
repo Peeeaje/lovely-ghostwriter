@@ -283,7 +283,11 @@ func TestMarkReviewedReconcilesFailedPullRequest(t *testing.T) {
 	if err := store.FinishRun(context.Background(), run, StatusFailed, errors.New("confirmation failed")); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.MarkReviewed(context.Background(), pr.Repository, pr.Number, pr.HeadSHA); err != nil {
+	runID, ok, err := store.LatestFailedRunID(context.Background(), pr.Repository, pr.Number, pr.HeadSHA)
+	if err != nil || !ok || runID != run.ID {
+		t.Fatalf("LatestFailedRunID() id=%d ok=%v err=%v", runID, ok, err)
+	}
+	if err := store.MarkReviewed(context.Background(), pr.Repository, pr.Number, pr.HeadSHA, runID); err != nil {
 		t.Fatal(err)
 	}
 	counts, err := store.Counts(context.Background())

@@ -17,7 +17,8 @@ type PullRequestSource interface {
 
 type PullRequestStore interface {
 	UpsertPullRequest(context.Context, state.PullRequest) (bool, error)
-	MarkReviewed(context.Context, string, int, string) error
+	LatestFailedRunID(context.Context, string, int, string) (int64, bool, error)
+	MarkReviewed(context.Context, string, int, string, int64) error
 }
 
 type Result struct {
@@ -48,8 +49,14 @@ func (s *Scanner) Scan(ctx context.Context, cfg config.Config) (Result, error) {
 		}
 		for _, pr := range prs {
 			if gh.HasMarker(pr, cfg.Review.Marker, pr.HeadSHA, reviewer) {
-				if err := s.store.MarkReviewed(ctx, repository.Name, pr.Number, pr.HeadSHA); err != nil {
+				runID, failed, err := s.store.LatestFailedRunID(ctx, repository.Name, pr.Number, pr.HeadSHA)
+				if err != nil {
 					return result, err
+				}
+				if failed && gh.HasRunMarker(pr, cfg.Review.Marker, pr.HeadSHA, reviewer, runID) {
+					if err := s.store.MarkReviewed(ctx, repository.Name, pr.Number, pr.HeadSHA, runID); err != nil {
+						return result, err
+					}
 				}
 				result.Skipped++
 				continue

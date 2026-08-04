@@ -22,11 +22,16 @@ func (f fakeSource) CurrentUser(context.Context) (string, error) {
 }
 
 type fakeStore struct {
-	prs      []state.PullRequest
-	reviewed []int
+	prs         []state.PullRequest
+	failedRunID int64
+	reviewed    []int
 }
 
-func (f *fakeStore) MarkReviewed(_ context.Context, _ string, number int, _ string) error {
+func (f *fakeStore) LatestFailedRunID(context.Context, string, int, string) (int64, bool, error) {
+	return f.failedRunID, f.failedRunID != 0, nil
+}
+
+func (f *fakeStore) MarkReviewed(_ context.Context, _ string, number int, _ string, _ int64) error {
 	f.reviewed = append(f.reviewed, number)
 	return nil
 }
@@ -41,9 +46,10 @@ func TestScanFiltersAndClassifiesPullRequests(t *testing.T) {
 		{Number: 1, State: "OPEN", HeadSHA: "one", BaseBranch: "main", BaseSHA: "base", Author: gh.Actor{Login: "alice"}, ReviewRequests: []gh.ReviewRequest{{Login: "reviewer"}}},
 		{Number: 2, State: "OPEN", HeadSHA: "two", BaseBranch: "release", BaseSHA: "release-base", Author: gh.Actor{Login: "alice"}, ReviewRequests: []gh.ReviewRequest{{Login: "reviewer"}}},
 		{Number: 3, State: "OPEN", HeadSHA: "three", BaseBranch: "main", BaseSHA: "base", Author: gh.Actor{Login: "bot"}, ReviewRequests: []gh.ReviewRequest{{Login: "reviewer"}}},
-		{Number: 4, State: "OPEN", HeadSHA: "four", BaseBranch: "main", BaseSHA: "base", Author: gh.Actor{Login: "alice"}, Reviews: []gh.Review{{Author: gh.Actor{Login: "reviewer"}, Body: "<!-- codex-auto-review head=four -->"}}},
+		{Number: 4, State: "OPEN", HeadSHA: "four", BaseBranch: "main", BaseSHA: "base", Author: gh.Actor{Login: "alice"}, Reviews: []gh.Review{{Author: gh.Actor{Login: "reviewer"}, Body: "<!-- codex-auto-review head=four run=41 -->"}}},
+		{Number: 5, State: "OPEN", HeadSHA: "five", BaseBranch: "main", BaseSHA: "base", Author: gh.Actor{Login: "alice"}, Reviews: []gh.Review{{Author: gh.Actor{Login: "reviewer"}, Body: "<!-- codex-auto-review head=five run=40 -->"}}},
 	}}
-	store := &fakeStore{}
+	store := &fakeStore{failedRunID: 41}
 	cfg := config.Default()
 	cfg.Repositories[0] = config.RepositoryConfig{
 		Name:           "owner/repository",
@@ -58,7 +64,7 @@ func TestScanFiltersAndClassifiesPullRequests(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Queued != 1 || result.Detected != 1 || result.Skipped != 2 {
+	if result.Queued != 1 || result.Detected != 1 || result.Skipped != 3 {
 		t.Fatalf("Scan() = %+v", result)
 	}
 	if store.prs[0].Status != state.StatusQueued || store.prs[1].Status != state.StatusDetected {

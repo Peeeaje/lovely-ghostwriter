@@ -389,15 +389,47 @@ WHERE repository = ? AND number = ? AND head_sha = ?
 	return rows == 1, nil
 }
 
-func (s *Store) MarkReviewed(ctx context.Context, repository string, number int, headSHA string) error {
-	_, err := s.db.ExecContext(ctx, `
+func (s *Store) LatestFailedRunID(ctx context.Context, repository string, number int, headSHA string) (int64, bool, error) {
+	var runID int64
+	err := s.db.QueryRowContext(ctx, `
+SELECT id FROM runs
+WHERE repository = ? AND number = ? AND head_sha = ? AND status = 'failed'
+ORDER BY id DESC LIMIT 1
+`, repository, number, headSHA).Scan(&runID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, false, nil
+	}
+	if err != nil {
+		return 0, false, fmt.Errorf("find latest failed run: %w", err)
+	}
+	return runID, true, nil
+}
+
+func (s *Store) MarkReviewed(ctx context.Context, repository string, number int, headSHA string, runID int64) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin review reconciliation: %w", err)
+	}
+	defer tx.Rollback()
+	now := time.Now().UTC().Truncate(time.Second).Format(time.RFC3339)
+	result, err := tx.ExecContext(ctx, `
+UPDATE runs SET status = 'reviewed', ended_at = ?, error = ''
+WHERE id = ? AND repository = ? AND number = ? AND head_sha = ? AND status = 'failed'
+`, now, runID, repository, number, headSHA)
+	if err != nil {
+		return fmt.Errorf("reconcile failed run: %w", err)
+	}
+	rows, err := result.RowsAffected()
+	if err != nil || rows != 1 {
+		return fmt.Errorf("failed run %d is no longer eligible for reconciliation", runID)
+	}
+	if _, err := tx.ExecContext(ctx, `
 UPDATE pull_requests SET status = 'reviewed', updated_at = ?
 WHERE repository = ? AND number = ? AND head_sha = ? AND status = 'failed'
-`, time.Now().UTC().Truncate(time.Second).Format(time.RFC3339), repository, number, headSHA)
-	if err != nil {
+`, now, repository, number, headSHA); err != nil {
 		return fmt.Errorf("reconcile reviewed pull request: %w", err)
 	}
-	return nil
+	return tx.Commit()
 }
 
 func (s *Store) Counts(ctx context.Context) (map[Status]int, error) {
