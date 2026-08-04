@@ -264,14 +264,15 @@ func (s *Store) Enqueue(ctx context.Context, pr PullRequest, force bool) (bool, 
 	if err != nil || created {
 		return created, err
 	}
-	if !force {
-		return false, nil
+	predicate := "status = 'detected'"
+	if force {
+		predicate = "status != 'running'"
 	}
 	now := time.Now().UTC().Truncate(time.Second).Format(time.RFC3339)
 	result, err := s.db.ExecContext(ctx, `
 UPDATE pull_requests SET status = 'queued', updated_at = ?
-WHERE repository = ? AND number = ? AND head_sha = ? AND status != 'running'
-`, now, pr.Repository, pr.Number, pr.HeadSHA)
+WHERE repository = ? AND number = ? AND head_sha = ? AND `+predicate,
+		now, pr.Repository, pr.Number, pr.HeadSHA)
 	if err != nil {
 		return false, fmt.Errorf("requeue pull request: %w", err)
 	}

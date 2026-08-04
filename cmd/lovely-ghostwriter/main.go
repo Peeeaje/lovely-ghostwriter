@@ -274,7 +274,11 @@ func enqueue(ctx context.Context, opts options, args []string, out io.Writer) er
 	if pr.State != "OPEN" {
 		return fmt.Errorf("pull request %s is not open", ref)
 	}
-	if gh.HasMarker(pr, cfg.Review.Marker, pr.HeadSHA) && !force {
+	reviewer, err := client.CurrentUser(ctx)
+	if err != nil {
+		return err
+	}
+	if gh.HasMarker(pr, cfg.Review.Marker, pr.HeadSHA, reviewer) && !force {
 		return fmt.Errorf("pull request %s already has a review marker for head %s; use --force to rerun", ref, pr.HeadSHA)
 	}
 	queued, err := store.Enqueue(ctx, state.PullRequest{

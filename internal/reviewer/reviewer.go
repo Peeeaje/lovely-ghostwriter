@@ -48,11 +48,11 @@ func (r *Runner) Run(ctx context.Context, repository config.RepositoryConfig, pr
 		return status, err
 	}
 	if err := r.Store.SetRunPaths(ctx, run.ID, logPath, artifactPath, worktreePath); err != nil {
-		_ = r.Worktrees.Cleanup(context.Background(), sourcePath, worktreePath)
+		_ = r.Worktrees.Cleanup(context.Background(), sourcePath, worktreePath, run.ID)
 		return status, err
 	}
 	defer func() {
-		cleanupErr := r.Worktrees.Cleanup(context.Background(), sourcePath, worktreePath)
+		cleanupErr := r.Worktrees.Cleanup(context.Background(), sourcePath, worktreePath, run.ID)
 		if cleanupErr != nil && runErr == nil {
 			runErr = cleanupErr
 			status = state.StatusFailed
@@ -145,7 +145,7 @@ func (r *Runner) Run(ctx context.Context, repository config.RepositoryConfig, pr
 	if err != nil {
 		return status, err
 	}
-	if !gh.HasRunMarker(posted, r.Config.Review.Marker, pr.HeadSHA, run.ID) {
+	if !gh.HasRunMarker(posted, r.Config.Review.Marker, pr.HeadSHA, reviewer, run.ID) {
 		return status, fmt.Errorf("submitted review marker was not found for run %d", run.ID)
 	}
 	return state.StatusReviewed, nil

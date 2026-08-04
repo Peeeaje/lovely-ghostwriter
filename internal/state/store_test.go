@@ -87,3 +87,28 @@ func TestClaimAndFinishRun(t *testing.T) {
 		t.Fatalf("completed count = %d, want 1", counts[StatusCompleted])
 	}
 }
+
+func TestEnqueuePromotesDetectedWithoutForce(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	pr := PullRequest{
+		Repository: "owner/repository", Number: 42, HeadSHA: "abc123", Title: "Change",
+		URL: "https://github.com/owner/repository/pull/42", Author: "alice",
+		BaseBranch: "release", BaseSHA: "base123", Status: StatusDetected,
+	}
+	if _, err := store.UpsertPullRequest(context.Background(), pr); err != nil {
+		t.Fatal(err)
+	}
+	pr.Status = StatusQueued
+	queued, err := store.Enqueue(context.Background(), pr, false)
+	if err != nil || !queued {
+		t.Fatalf("Enqueue() queued=%v err=%v", queued, err)
+	}
+	claimed, _, ok, err := store.ClaimNext(context.Background())
+	if err != nil || !ok || claimed.Number != 42 {
+		t.Fatalf("ClaimNext() pr=%+v ok=%v err=%v", claimed, ok, err)
+	}
+}

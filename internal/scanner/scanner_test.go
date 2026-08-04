@@ -17,6 +17,10 @@ func (f fakeSource) OpenPullRequests(context.Context, string) ([]gh.PullRequest,
 	return f.prs, nil
 }
 
+func (f fakeSource) CurrentUser(context.Context) (string, error) {
+	return "reviewer", nil
+}
+
 type fakeStore struct {
 	prs []state.PullRequest
 }

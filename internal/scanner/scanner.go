@@ -12,6 +12,7 @@ import (
 
 type PullRequestSource interface {
 	OpenPullRequests(context.Context, string) ([]gh.PullRequest, error)
+	CurrentUser(context.Context) (string, error)
 }
 
 type PullRequestStore interface {
@@ -35,13 +36,17 @@ func New(source PullRequestSource, store PullRequestStore) *Scanner {
 
 func (s *Scanner) Scan(ctx context.Context, cfg config.Config) (Result, error) {
 	var result Result
+	reviewer, err := s.source.CurrentUser(ctx)
+	if err != nil {
+		return result, err
+	}
 	for _, repository := range cfg.Repositories {
 		prs, err := s.source.OpenPullRequests(ctx, repository.Name)
 		if err != nil {
 			return result, err
 		}
 		for _, pr := range prs {
-			if gh.HasMarker(pr, cfg.Review.Marker, pr.HeadSHA) || !eligible(repository, pr) {
+			if gh.HasMarker(pr, cfg.Review.Marker, pr.HeadSHA, reviewer) || !eligible(repository, pr) {
 				result.Skipped++
 				continue
 			}
