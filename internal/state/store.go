@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -203,6 +204,27 @@ ON CONFLICT(repository, number) DO UPDATE SET head_sha = excluded.head_sha
 `, repository, number, headSHA)
 	if err != nil {
 		return fmt.Errorf("set current pull request head: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) MarkMissingStale(ctx context.Context, repository string, openNumbers []int) error {
+	query := `
+UPDATE pull_requests SET status = 'stale', updated_at = ?
+WHERE repository = ? AND status IN ('detected', 'queued', 'failed')
+  AND EXISTS (SELECT 1 FROM current_pull_requests current
+    WHERE current.repository = pull_requests.repository
+      AND current.number = pull_requests.number
+      AND current.head_sha = pull_requests.head_sha)`
+	args := []any{time.Now().UTC().Truncate(time.Second).Format(time.RFC3339), repository}
+	if len(openNumbers) > 0 {
+		query += " AND number NOT IN (?" + strings.Repeat(",?", len(openNumbers)-1) + ")"
+		for _, number := range openNumbers {
+			args = append(args, number)
+		}
+	}
+	if _, err := s.db.ExecContext(ctx, query, args...); err != nil {
+		return fmt.Errorf("mark missing pull requests stale: %w", err)
 	}
 	return nil
 }
@@ -769,7 +791,9 @@ WHERE status IN ('running', 'failed')
     ORDER BY latest.id DESC LIMIT 1
   )
   AND EXISTS (SELECT 1 FROM current_pull_requests current
-    WHERE current.repository = runs.repository AND current.number = runs.number AND current.head_sha = runs.head_sha)
+    JOIN pull_requests pr USING (repository, number, head_sha)
+    WHERE current.repository = runs.repository AND current.number = runs.number AND current.head_sha = runs.head_sha
+      AND pr.status IN ('running', 'failed'))
 ORDER BY started_at DESC
 `)
 	if err != nil {
@@ -801,7 +825,9 @@ AND id = (
   ORDER BY latest.id DESC LIMIT 1
 )
 AND EXISTS (SELECT 1 FROM current_pull_requests current
-  WHERE current.repository = runs.repository AND current.number = runs.number AND current.head_sha = runs.head_sha)`
+  JOIN pull_requests pr USING (repository, number, head_sha)
+  WHERE current.repository = runs.repository AND current.number = runs.number AND current.head_sha = runs.head_sha
+    AND pr.status IN ('running', 'failed'))`
 	if all {
 		predicate = ""
 	}
