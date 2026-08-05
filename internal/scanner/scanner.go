@@ -16,9 +16,10 @@ type PullRequestSource interface {
 }
 
 type PullRequestStore interface {
+	SetCurrentHead(context.Context, string, int, string) error
 	UpsertPullRequest(context.Context, state.PullRequest) (bool, error)
-	HasPreviousRevision(context.Context, string, int, string, string) (bool, error)
-	RevisionExists(context.Context, string, int, string, string) (bool, error)
+	HasPreviousTarget(context.Context, string, int, string, string) (bool, error)
+	TargetExists(context.Context, string, int, string, string) (bool, error)
 	LatestFailedRunID(context.Context, string, int, string) (int64, bool, error)
 	MarkReviewed(context.Context, string, int, string, int64) error
 }
@@ -56,12 +57,15 @@ func (s *Scanner) Scan(ctx context.Context, cfg config.Config) (Result, error) {
 				result.Skipped++
 				continue
 			}
-			if gh.HasMarker(pr, review.Marker, pr.HeadSHA, pr.BaseSHA, reviewer) {
+			if err := s.store.SetCurrentHead(ctx, repository.Name, pr.Number, pr.HeadSHA); err != nil {
+				return result, err
+			}
+			if gh.HasMarker(pr, review.Marker, pr.HeadSHA, pr.BaseBranch, reviewer) {
 				runID, failed, err := s.store.LatestFailedRunID(ctx, repository.Name, pr.Number, pr.HeadSHA)
 				if err != nil {
 					return result, err
 				}
-				if failed && gh.HasRunMarker(pr, review.Marker, pr.HeadSHA, pr.BaseSHA, reviewer, runID) {
+				if failed && gh.HasRunMarker(pr, review.Marker, pr.HeadSHA, pr.BaseBranch, reviewer, runID) {
 					if err := s.store.MarkReviewed(ctx, repository.Name, pr.Number, pr.HeadSHA, runID); err != nil {
 						return result, err
 					}
@@ -75,7 +79,7 @@ func (s *Scanner) Scan(ctx context.Context, cfg config.Config) (Result, error) {
 			}
 			trigger := repository.Trigger(false)
 			if trigger != repository.Trigger(true) {
-				isUpdate, err := s.store.HasPreviousRevision(ctx, repository.Name, pr.Number, pr.HeadSHA, pr.BaseSHA)
+				isUpdate, err := s.store.HasPreviousTarget(ctx, repository.Name, pr.Number, pr.HeadSHA, pr.BaseBranch)
 				if err != nil {
 					return result, err
 				}
@@ -97,7 +101,7 @@ func (s *Scanner) Scan(ctx context.Context, cfg config.Config) (Result, error) {
 				BaseSHA:    pr.BaseSHA,
 				Status:     status,
 			}
-			knownRevision, err := s.store.RevisionExists(ctx, repository.Name, pr.Number, pr.HeadSHA, pr.BaseSHA)
+			knownRevision, err := s.store.TargetExists(ctx, repository.Name, pr.Number, pr.HeadSHA, pr.BaseBranch)
 			if err != nil {
 				return result, err
 			}

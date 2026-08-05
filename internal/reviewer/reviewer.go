@@ -55,7 +55,7 @@ func (r *Runner) PrepareAutomatic(ctx context.Context, repository config.Reposit
 	if err != nil {
 		return target, false, err
 	}
-	if current.HeadSHA != target.HeadSHA || target.BaseSHA != "" && (current.BaseSHA != target.BaseSHA || current.BaseBranch != target.BaseBranch) {
+	if current.HeadSHA != target.HeadSHA || target.BaseBranch != "" && current.BaseBranch != target.BaseBranch {
 		return target, false, nil
 	}
 	target.BaseBranch = current.BaseBranch
@@ -75,7 +75,7 @@ func (r *Runner) automaticEligible(ctx context.Context, repository config.Reposi
 	}
 	trigger := repository.Trigger(false)
 	if trigger != repository.Trigger(true) {
-		isUpdate, err := r.Store.HasPreviousRevision(ctx, repository.Name, current.Number, current.HeadSHA, current.BaseSHA)
+		isUpdate, err := r.Store.HasPreviousTarget(ctx, repository.Name, current.Number, current.HeadSHA, current.BaseBranch)
 		if err != nil {
 			return false, err
 		}
@@ -97,7 +97,7 @@ func (r *Runner) RecoveredReviewPosted(ctx context.Context, repository config.Re
 		return false, err
 	}
 	review := repository.EffectiveReview(r.Config.Review)
-	return gh.HasRunMarker(current, review.Marker, target.HeadSHA, target.BaseSHA, reviewer, target.RecoveryRunID), nil
+	return gh.HasRunMarker(current, review.Marker, target.HeadSHA, target.BaseBranch, reviewer, target.RecoveryRunID), nil
 }
 
 func (r *Runner) Run(ctx context.Context, repository config.RepositoryConfig, pr state.PullRequest, run state.Run) (finishedRun state.Run, finishedPR state.PullRequest, status state.Status, runErr error) {
@@ -155,7 +155,7 @@ func (r *Runner) Run(ctx context.Context, repository config.RepositoryConfig, pr
 			return run, pr, state.StatusStale, nil
 		}
 		patch.Enabled = patch.Enabled && !current.IsCrossRepository
-		if current.HeadSHA != pr.HeadSHA || current.BaseSHA != pr.BaseSHA || current.BaseBranch != pr.BaseBranch {
+		if current.HeadSHA != pr.HeadSHA || current.BaseBranch != pr.BaseBranch {
 			if recheck >= review.MaxHeadRechecks {
 				return run, pr, state.StatusFailed, fmt.Errorf("pull request changed more than %d times during review", review.MaxHeadRechecks)
 			}
@@ -180,7 +180,7 @@ func (r *Runner) Run(ctx context.Context, repository config.RepositoryConfig, pr
 			pr = next
 		}
 
-		worktreePath, err = r.Worktrees.Prepare(ctx, sourcePath, pr.Repository, pr.Number, pr.BaseBranch, pr.BaseSHA, pr.HeadSHA, run.ID)
+		worktreePath, err = r.Worktrees.Prepare(ctx, sourcePath, pr.Repository, pr.Number, pr.BaseSHA, pr.HeadSHA, run.ID)
 		if err != nil {
 			_ = r.Store.SetRunPaths(ctx, run.ID, logPath, artifactPath, "")
 			latest, latestErr := r.GitHub.PullRequest(ctx, pr.Repository, pr.Number)
@@ -250,7 +250,7 @@ func (r *Runner) Run(ctx context.Context, repository config.RepositoryConfig, pr
 			writeStopArtifact(artifactPath, "stale-stop.md", "pull request closed before review submission")
 			return run, pr, state.StatusStale, nil
 		}
-		if current.HeadSHA != pr.HeadSHA || current.BaseSHA != pr.BaseSHA || current.BaseBranch != pr.BaseBranch {
+		if current.HeadSHA != pr.HeadSHA || current.BaseBranch != pr.BaseBranch {
 			if err := cleanupWorktree(); err != nil {
 				return run, pr, state.StatusFailed, err
 			}
@@ -295,7 +295,7 @@ func (r *Runner) Run(ctx context.Context, repository config.RepositoryConfig, pr
 		if err != nil {
 			return run, pr, state.StatusFailed, err
 		}
-		if latest.State != "OPEN" || latest.HeadSHA != pr.HeadSHA || latest.BaseSHA != pr.BaseSHA || latest.BaseBranch != pr.BaseBranch {
+		if latest.State != "OPEN" || latest.HeadSHA != pr.HeadSHA || latest.BaseBranch != pr.BaseBranch {
 			if patchURL != "" {
 				if err := closePatchPullRequest(context.Background(), patchURL); err != nil {
 					writeStopArtifact(artifactPath, "patch-close-error.md", err.Error())
@@ -403,7 +403,7 @@ func (r *Runner) Run(ctx context.Context, repository config.RepositoryConfig, pr
 			previousArtifact = artifactPath
 			continue
 		}
-		if !gh.HasRunMarker(posted, review.Marker, pr.HeadSHA, pr.BaseSHA, reviewer, run.ID) {
+		if !gh.HasRunMarker(posted, review.Marker, pr.HeadSHA, pr.BaseBranch, reviewer, run.ID) {
 			return run, pr, state.StatusFailed, fmt.Errorf("submitted review marker was not found for run %d", run.ID)
 		}
 		return run, pr, state.StatusReviewed, nil
@@ -809,9 +809,6 @@ func currentTarget(current gh.PullRequest, target state.PullRequest) error {
 	}
 	if current.HeadSHA != target.HeadSHA {
 		return fmt.Errorf("pull request head changed from %s to %s", target.HeadSHA, current.HeadSHA)
-	}
-	if current.BaseSHA != target.BaseSHA {
-		return fmt.Errorf("pull request base changed from %s to %s", target.BaseSHA, current.BaseSHA)
 	}
 	if current.BaseBranch != target.BaseBranch {
 		return fmt.Errorf("pull request base branch changed from %s to %s", target.BaseBranch, current.BaseBranch)

@@ -208,7 +208,9 @@ Runtime state and logs are stored separately from configuration:
 
 `XDG_CONFIG_HOME` and `XDG_STATE_HOME` override these base directories.
 
-SQLite uses WAL mode and treats `(repository, pull request number, head SHA)` as the identity of a detected revision. Only one head of a pull request runs at a time. If the head advances, the existing run keeps its artifacts, retargets to the current head, and rechecks before posting. A closed or merged pull request is stopped and recorded as stale.
+SQLite uses WAL mode and treats `(repository, pull request number, head SHA)` as the identity of a detected revision. Only one head of a pull request runs at a time. If the head advances, the existing run keeps its artifacts, retargets to the current head, and rechecks before posting. Advances to the base branch do not restart a review; the recorded base SHA remains the diff anchor for that head. A closed or merged pull request is stopped and recorded as stale.
+
+Each review uses a dedicated Git worktree. The daemon removes the worktree and its temporary refs mechanically on success, failure, cancellation, and head retargeting. Repository-specific processes started by Codex, such as Docker Compose or development servers, must be stopped by Codex before it returns the review result.
 
 ## Roadmap
 

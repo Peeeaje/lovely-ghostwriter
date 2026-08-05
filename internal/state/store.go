@@ -124,13 +124,20 @@ CREATE TABLE IF NOT EXISTS pull_requests (
 CREATE INDEX IF NOT EXISTS pull_requests_status_idx
   ON pull_requests(status, updated_at DESC);
 
-CREATE TABLE IF NOT EXISTS pull_request_revisions (
+CREATE TABLE IF NOT EXISTS current_pull_requests (
   repository TEXT NOT NULL,
   number INTEGER NOT NULL,
   head_sha TEXT NOT NULL,
-  base_sha TEXT NOT NULL,
+  PRIMARY KEY (repository, number)
+);
+
+CREATE TABLE IF NOT EXISTS pull_request_targets (
+  repository TEXT NOT NULL,
+  number INTEGER NOT NULL,
+  head_sha TEXT NOT NULL,
+  base_branch TEXT NOT NULL,
   detected_at TEXT NOT NULL,
-  PRIMARY KEY (repository, number, head_sha, base_sha)
+  PRIMARY KEY (repository, number, head_sha, base_branch)
 );
 
 CREATE TABLE IF NOT EXISTS runs (
@@ -170,10 +177,32 @@ CREATE INDEX IF NOT EXISTS runs_status_idx ON runs(status, started_at DESC);
 		return err
 	}
 	if _, err := s.db.ExecContext(ctx, `
-INSERT OR IGNORE INTO pull_request_revisions (repository, number, head_sha, base_sha, detected_at)
-SELECT repository, number, head_sha, base_sha, detected_at FROM pull_requests
+INSERT OR IGNORE INTO pull_request_targets (repository, number, head_sha, base_branch, detected_at)
+SELECT repository, number, head_sha, base_branch, detected_at FROM pull_requests
 `); err != nil {
-		return fmt.Errorf("backfill pull request revisions: %w", err)
+		return fmt.Errorf("backfill pull request targets: %w", err)
+	}
+	if _, err := s.db.ExecContext(ctx, `
+INSERT OR IGNORE INTO current_pull_requests (repository, number, head_sha)
+SELECT repository, number, head_sha FROM pull_requests current
+WHERE current.rowid = (
+  SELECT latest.rowid FROM pull_requests latest
+  WHERE latest.repository = current.repository AND latest.number = current.number
+  ORDER BY latest.updated_at DESC, latest.rowid DESC LIMIT 1
+)
+`); err != nil {
+		return fmt.Errorf("backfill current pull request heads: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) SetCurrentHead(ctx context.Context, repository string, number int, headSHA string) error {
+	_, err := s.db.ExecContext(ctx, `
+INSERT INTO current_pull_requests (repository, number, head_sha) VALUES (?, ?, ?)
+ON CONFLICT(repository, number) DO UPDATE SET head_sha = excluded.head_sha
+`, repository, number, headSHA)
+	if err != nil {
+		return fmt.Errorf("set current pull request head: %w", err)
 	}
 	return nil
 }
@@ -334,10 +363,14 @@ WHERE repository = ? AND number = ? AND head_sha = ? AND status = 'running'
 		return false, fmt.Errorf("mark previous head stale: %w", err)
 	}
 	if _, err := tx.ExecContext(ctx, `
-INSERT OR IGNORE INTO pull_request_revisions (repository, number, head_sha, base_sha, detected_at)
-VALUES (?, ?, ?, ?, ?)
-`, current.Repository, current.Number, current.HeadSHA, current.BaseSHA, now); err != nil {
-		return false, fmt.Errorf("record current revision: %w", err)
+INSERT INTO pull_request_targets (repository, number, head_sha, base_branch, detected_at)
+SELECT ?, ?, ?, ?, ?
+WHERE NOT EXISTS (
+  SELECT 1 FROM pull_request_targets
+  WHERE repository = ? AND number = ? AND head_sha = ? AND base_branch = ?
+)
+`, current.Repository, current.Number, current.HeadSHA, current.BaseBranch, now, current.Repository, current.Number, current.HeadSHA, current.BaseBranch); err != nil {
+		return false, fmt.Errorf("record current target: %w", err)
 	}
 	if _, err := tx.ExecContext(ctx, `
 INSERT INTO pull_requests (
@@ -358,6 +391,12 @@ ON CONFLICT(repository, number, head_sha) DO UPDATE SET
 `, current.Repository, current.Number, current.HeadSHA, current.Title, current.URL, current.Author,
 		current.BaseBranch, current.BaseSHA, effectiveManual, now, now); err != nil {
 		return false, fmt.Errorf("activate current head: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `
+INSERT INTO current_pull_requests (repository, number, head_sha) VALUES (?, ?, ?)
+ON CONFLICT(repository, number) DO UPDATE SET head_sha = excluded.head_sha
+`, current.Repository, current.Number, current.HeadSHA); err != nil {
+		return false, fmt.Errorf("set current head after retarget: %w", err)
 	}
 	if _, err := tx.ExecContext(ctx, `
 UPDATE runs SET
@@ -545,10 +584,14 @@ WHERE repository = ? AND number = ? AND head_sha = ? AND `+predicate,
 func (s *Store) UpsertPullRequest(ctx context.Context, pr PullRequest) (bool, error) {
 	now := time.Now().UTC().Truncate(time.Second)
 	if _, err := s.db.ExecContext(ctx, `
-INSERT OR IGNORE INTO pull_request_revisions (repository, number, head_sha, base_sha, detected_at)
-VALUES (?, ?, ?, ?, ?)
-`, pr.Repository, pr.Number, pr.HeadSHA, pr.BaseSHA, now.Format(time.RFC3339)); err != nil {
-		return false, fmt.Errorf("record pull request revision %s#%d: %w", pr.Repository, pr.Number, err)
+INSERT INTO pull_request_targets (repository, number, head_sha, base_branch, detected_at)
+SELECT ?, ?, ?, ?, ?
+WHERE NOT EXISTS (
+  SELECT 1 FROM pull_request_targets
+  WHERE repository = ? AND number = ? AND head_sha = ? AND base_branch = ?
+)
+`, pr.Repository, pr.Number, pr.HeadSHA, pr.BaseBranch, now.Format(time.RFC3339), pr.Repository, pr.Number, pr.HeadSHA, pr.BaseBranch); err != nil {
+		return false, fmt.Errorf("record pull request target %s#%d: %w", pr.Repository, pr.Number, err)
 	}
 	result, err := s.db.ExecContext(ctx, `
 INSERT OR IGNORE INTO pull_requests (
@@ -568,16 +611,19 @@ UPDATE pull_requests
 SET title = ?, url = ?, author = ?,
     status = CASE
       WHEN manual = 0 AND ? = 0 AND status IN ('detected', 'canceled') AND ? = 'queued' THEN ?
-      WHEN manual = 0 AND (base_sha <> ? OR base_branch <> ?) AND status IN ('detected', 'canceled', 'failed', 'completed', 'reviewed') THEN ?
+      WHEN manual = 0 AND base_branch <> ? AND status IN ('detected', 'canceled', 'failed', 'completed', 'reviewed') THEN ?
       ELSE status
     END,
     base_branch = CASE WHEN status = 'running' THEN base_branch ELSE ? END,
     base_sha = CASE WHEN status = 'running' THEN base_sha ELSE ? END,
     updated_at = ?
 WHERE repository = ? AND number = ? AND head_sha = ?
-`, pr.Title, pr.URL, pr.Author, pr.Manual, pr.Status, pr.Status, pr.BaseSHA, pr.BaseBranch, pr.Status, pr.BaseBranch, pr.BaseSHA, now.Format(time.RFC3339), pr.Repository, pr.Number, pr.HeadSHA); err != nil {
+`, pr.Title, pr.URL, pr.Author, pr.Manual, pr.Status, pr.Status, pr.BaseBranch, pr.Status, pr.BaseBranch, pr.BaseSHA, now.Format(time.RFC3339), pr.Repository, pr.Number, pr.HeadSHA); err != nil {
 			return false, fmt.Errorf("update pull request %s#%d: %w", pr.Repository, pr.Number, err)
 		}
+	}
+	if err := s.SetCurrentHead(ctx, pr.Repository, pr.Number, pr.HeadSHA); err != nil {
+		return false, err
 	}
 	return rows == 1, nil
 }
@@ -598,30 +644,30 @@ ORDER BY id DESC LIMIT 1
 	return runID, true, nil
 }
 
-func (s *Store) HasPreviousRevision(ctx context.Context, repository string, number int, headSHA, baseSHA string) (bool, error) {
+func (s *Store) HasPreviousTarget(ctx context.Context, repository string, number int, headSHA, baseBranch string) (bool, error) {
 	var previous bool
 	err := s.db.QueryRowContext(ctx, `
 SELECT EXISTS (
-  SELECT 1 FROM pull_request_revisions
-  WHERE repository = ? AND number = ? AND (head_sha <> ? OR base_sha <> ?)
+  SELECT 1 FROM pull_request_targets
+  WHERE repository = ? AND number = ? AND (head_sha <> ? OR base_branch <> ?)
 )
-`, repository, number, headSHA, baseSHA).Scan(&previous)
+`, repository, number, headSHA, baseBranch).Scan(&previous)
 	if err != nil {
-		return false, fmt.Errorf("check previous pull request revision: %w", err)
+		return false, fmt.Errorf("check previous pull request target: %w", err)
 	}
 	return previous, nil
 }
 
-func (s *Store) RevisionExists(ctx context.Context, repository string, number int, headSHA, baseSHA string) (bool, error) {
+func (s *Store) TargetExists(ctx context.Context, repository string, number int, headSHA, baseBranch string) (bool, error) {
 	var exists bool
 	err := s.db.QueryRowContext(ctx, `
 SELECT EXISTS (
-  SELECT 1 FROM pull_request_revisions
-  WHERE repository = ? AND number = ? AND head_sha = ? AND base_sha = ?
+  SELECT 1 FROM pull_request_targets
+  WHERE repository = ? AND number = ? AND head_sha = ? AND base_branch = ?
 )
-`, repository, number, headSHA, baseSHA).Scan(&exists)
+`, repository, number, headSHA, baseBranch).Scan(&exists)
 	if err != nil {
-		return false, fmt.Errorf("check pull request revision: %w", err)
+		return false, fmt.Errorf("check pull request target: %w", err)
 	}
 	return exists, nil
 }
@@ -654,7 +700,10 @@ WHERE repository = ? AND number = ? AND head_sha = ? AND status = 'failed'
 }
 
 func (s *Store) Counts(ctx context.Context) (map[Status]int, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT status, COUNT(*) FROM pull_requests GROUP BY status`)
+	rows, err := s.db.QueryContext(ctx, `
+SELECT status, COUNT(*) FROM pull_requests
+JOIN current_pull_requests USING (repository, number, head_sha)
+GROUP BY status`)
 	if err != nil {
 		return nil, fmt.Errorf("count pull requests: %w", err)
 	}
@@ -677,7 +726,8 @@ func (s *Store) Active(ctx context.Context) ([]PullRequest, error) {
 }
 
 func (s *Store) PullRequests(ctx context.Context, all bool) ([]PullRequest, error) {
-	predicate := "WHERE status IN ('detected', 'queued', 'running', 'failed')"
+	predicate := `JOIN current_pull_requests USING (repository, number, head_sha)
+WHERE status IN ('detected', 'queued', 'running', 'failed')`
 	if all {
 		predicate = ""
 	}
@@ -711,6 +761,15 @@ SELECT id, repository, number, head_sha, attempt, status, started_at,
        COALESCE(ended_at, ''), log_path, artifact_path, worktree_path, error
 FROM runs
 WHERE status IN ('running', 'failed')
+  AND id = (
+    SELECT latest.id FROM runs latest
+    WHERE latest.repository = runs.repository
+      AND latest.number = runs.number
+      AND latest.head_sha = runs.head_sha
+    ORDER BY latest.id DESC LIMIT 1
+  )
+  AND EXISTS (SELECT 1 FROM current_pull_requests current
+    WHERE current.repository = runs.repository AND current.number = runs.number AND current.head_sha = runs.head_sha)
 ORDER BY started_at DESC
 `)
 	if err != nil {
@@ -733,7 +792,16 @@ ORDER BY started_at DESC
 }
 
 func (s *Store) Runs(ctx context.Context, all bool) ([]Run, error) {
-	predicate := "WHERE status IN ('running', 'failed')"
+	predicate := `WHERE status IN ('running', 'failed')
+AND id = (
+  SELECT latest.id FROM runs latest
+  WHERE latest.repository = runs.repository
+    AND latest.number = runs.number
+    AND latest.head_sha = runs.head_sha
+  ORDER BY latest.id DESC LIMIT 1
+)
+AND EXISTS (SELECT 1 FROM current_pull_requests current
+  WHERE current.repository = runs.repository AND current.number = runs.number AND current.head_sha = runs.head_sha)`
 	if all {
 		predicate = ""
 	}

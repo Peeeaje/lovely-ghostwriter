@@ -29,11 +29,15 @@ type fakeStore struct {
 	updates     map[int]bool
 }
 
-func (f *fakeStore) RevisionExists(context.Context, string, int, string, string) (bool, error) {
+func (f *fakeStore) SetCurrentHead(context.Context, string, int, string) error {
+	return nil
+}
+
+func (f *fakeStore) TargetExists(context.Context, string, int, string, string) (bool, error) {
 	return false, nil
 }
 
-func (f *fakeStore) HasPreviousRevision(_ context.Context, _ string, number int, _, _ string) (bool, error) {
+func (f *fakeStore) HasPreviousTarget(_ context.Context, _ string, number int, _, _ string) (bool, error) {
 	return f.updates[number], nil
 }
 
@@ -56,8 +60,8 @@ func TestScanFiltersAndClassifiesPullRequests(t *testing.T) {
 		{Number: 1, State: "OPEN", HeadSHA: "one", BaseBranch: "main", BaseSHA: "base", Author: gh.Actor{Login: "alice"}, ReviewRequests: []gh.ReviewRequest{{Login: "reviewer"}}},
 		{Number: 2, State: "OPEN", HeadSHA: "two", BaseBranch: "release", BaseSHA: "release-base", Author: gh.Actor{Login: "alice"}, ReviewRequests: []gh.ReviewRequest{{Login: "reviewer"}}},
 		{Number: 3, State: "OPEN", HeadSHA: "three", BaseBranch: "main", BaseSHA: "base", Author: gh.Actor{Login: "bot"}, ReviewRequests: []gh.ReviewRequest{{Login: "reviewer"}}},
-		{Number: 4, State: "OPEN", HeadSHA: "four", BaseBranch: "main", BaseSHA: "base", Author: gh.Actor{Login: "alice"}, Reviews: []gh.Review{{Author: gh.Actor{Login: "reviewer"}, Body: "<!-- codex-auto-review head=four base=base run=41 -->"}}},
-		{Number: 5, State: "OPEN", HeadSHA: "five", BaseBranch: "main", BaseSHA: "base", Author: gh.Actor{Login: "alice"}, Reviews: []gh.Review{{Author: gh.Actor{Login: "reviewer"}, Body: "<!-- codex-auto-review head=five base=base run=40 -->"}}},
+		{Number: 4, State: "OPEN", HeadSHA: "four", BaseBranch: "main", BaseSHA: "base", Author: gh.Actor{Login: "alice"}, Reviews: []gh.Review{{Author: gh.Actor{Login: "reviewer"}, Body: "<!-- codex-auto-review head=four base_branch=main base=base run=41 -->"}}},
+		{Number: 5, State: "OPEN", HeadSHA: "five", BaseBranch: "main", BaseSHA: "base", Author: gh.Actor{Login: "alice"}, Reviews: []gh.Review{{Author: gh.Actor{Login: "reviewer"}, Body: "<!-- codex-auto-review head=five base_branch=main base=base run=40 -->"}}},
 		{Number: 6, State: "OPEN", Title: "[codex-auto-fix] Fix", HeadBranch: "develop/codex-auto-fix-1-head", HeadSHA: "six", BaseBranch: "main", BaseSHA: "base", Author: gh.Actor{Login: "reviewer"}, ReviewRequests: []gh.ReviewRequest{{Login: "reviewer"}}},
 	}}
 	store := &fakeStore{failedRunID: 41}
@@ -130,7 +134,7 @@ func TestScanUsesDifferentInitialAndUpdateTriggers(t *testing.T) {
 	}
 }
 
-func TestScanTreatsBaseChangeAsUpdate(t *testing.T) {
+func TestScanDoesNotTreatBaseChangeAsUpdate(t *testing.T) {
 	store, err := state.Open(filepath.Join(t.TempDir(), "state.db"))
 	if err != nil {
 		t.Fatal(err)
@@ -151,15 +155,41 @@ func TestScanTreatsBaseChangeAsUpdate(t *testing.T) {
 	}
 
 	result, err := New(source, store).Scan(context.Background(), cfg)
-	if err != nil || result.Queued != 0 || result.Detected != 1 || len(result.DetectedPullRequests) != 1 {
+	if err != nil || result.Queued != 0 || result.Detected != 0 || len(result.DetectedPullRequests) != 0 {
 		t.Fatalf("Scan() result=%+v err=%v", result, err)
 	}
-	active, err := store.PullRequests(context.Background(), false)
-	if err != nil || len(active) != 1 || active[0].Status != state.StatusDetected || active[0].BaseSHA != "new-base" {
-		t.Fatalf("PullRequests()=%+v err=%v", active, err)
+	all, err := store.PullRequests(context.Background(), true)
+	if err != nil || len(all) != 1 || all[0].Status != state.StatusReviewed || all[0].BaseSHA != "new-base" {
+		t.Fatalf("PullRequests()=%+v err=%v", all, err)
 	}
 	result, err = New(source, store).Scan(context.Background(), cfg)
 	if err != nil || result.Queued != 0 || result.Detected != 0 {
 		t.Fatalf("second Scan() result=%+v err=%v", result, err)
+	}
+}
+
+func TestScanTreatsBaseBranchChangeAsUpdate(t *testing.T) {
+	store, err := state.Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if _, err := store.UpsertPullRequest(context.Background(), state.PullRequest{
+		Repository: "owner/repository", Number: 1, HeadSHA: "head", BaseBranch: "main", BaseSHA: "base", Status: state.StatusReviewed,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	source := fakeSource{prs: []gh.PullRequest{{
+		Number: 1, State: "OPEN", HeadSHA: "head", BaseBranch: "release", BaseSHA: "base", Author: gh.Actor{Login: "alice"},
+	}}}
+	cfg := config.Default()
+	cfg.Repositories[0] = config.RepositoryConfig{
+		Name: "owner/repository", Path: "/tmp/repository", BaseBranches: []string{"main"}, Authors: []string{"alice"},
+		InitialTrigger: config.TriggerAlways, UpdateTrigger: config.TriggerManual,
+	}
+
+	result, err := New(source, store).Scan(context.Background(), cfg)
+	if err != nil || result.Detected != 1 || len(result.DetectedPullRequests) != 1 {
+		t.Fatalf("Scan() result=%+v err=%v", result, err)
 	}
 }

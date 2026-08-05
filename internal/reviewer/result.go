@@ -93,7 +93,7 @@ func submission(result Result, marker, reviewer string, pr state.PullRequest, ru
 	if patchURL != "" {
 		body += "\n\nBlocking findings addressed by patch PR: " + patchURL
 	}
-	body += fmt.Sprintf("\n\n---\n_このレビューはCodexによる自動生成です。最終判断は人間のreviewerが行ってください。_\n<!-- %s reviewer=%s head=%s base=%s run=%d -->",
-		marker, reviewer, pr.HeadSHA, pr.BaseSHA, runID)
+	body += fmt.Sprintf("\n\n---\n_このレビューはCodexによる自動生成です。最終判断は人間のreviewerが行ってください。_\n<!-- %s reviewer=%s head=%s base_branch=%s base=%s run=%d -->",
+		marker, reviewer, pr.HeadSHA, pr.BaseBranch, pr.BaseSHA, runID)
 	return gh.ReviewSubmission{CommitID: pr.HeadSHA, Event: "COMMENT", Body: body, Comments: comments}
 }
