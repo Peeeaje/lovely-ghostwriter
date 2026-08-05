@@ -46,6 +46,25 @@ func TestReadResultAndSubmission(t *testing.T) {
 	if !strings.Contains(submission.Body, "head=abc123 base_branch=main base=base123 run=42") {
 		t.Fatalf("submission body lacks run marker: %s", submission.Body)
 	}
+	if strings.Contains(submission.Body, result.Summary) || !strings.Contains(submission.Body, "未解決の指摘事項を投稿しました") {
+		t.Fatalf("submission body exposed the internal summary: %s", submission.Body)
+	}
+}
+
+func TestSubmissionWithoutFindingsFocusesOnCodeConclusion(t *testing.T) {
+	result := Result{
+		Decision: "NO_BLOCKING_FINDINGS",
+		Summary:  "独立Review役も同じ結論です。全テストが合格し、artifactへ保存してDockerを削除しました。ブラウザ確認は未実施です。",
+	}
+	submission := submission(result, "codex-auto-review", "alice", state.PullRequest{HeadSHA: "abc123", BaseBranch: "main", BaseSHA: "base123"}, 42, "")
+	if !strings.Contains(submission.Body, "最終状態のコード差分と関連コードを確認した範囲では、未解決の指摘事項はありません。") {
+		t.Fatalf("submission body lacks the code conclusion: %s", submission.Body)
+	}
+	for _, internalDetail := range []string{"独立Review役", "全テスト", "artifact", "Docker", "ブラウザ確認"} {
+		if strings.Contains(submission.Body, internalDetail) {
+			t.Fatalf("submission body contains internal detail %q: %s", internalDetail, submission.Body)
+		}
+	}
 }
 
 func TestCurrentTarget(t *testing.T) {
@@ -130,6 +149,15 @@ func TestPromptIncludesAdditionalInstructions(t *testing.T) {
 func TestPromptExplainsOptionalPatchOrchestration(t *testing.T) {
 	prompt := Prompt(config.ReviewConfig{}, config.PatchConfig{Enabled: true, MaxIterations: 2}, state.PullRequest{}, "/tmp/worktree", "/tmp/artifacts", "/tmp/previous")
 	for _, expected := range []string{"review -> patchable blocking", "最大2回", "/tmp/previous", "現在のheadで必ず再検証"} {
+		if !strings.Contains(prompt, expected) {
+			t.Fatalf("Prompt() does not contain %q: %s", expected, prompt)
+		}
+	}
+}
+
+func TestPromptKeepsInternalExecutionDetailsOutOfPublicSummary(t *testing.T) {
+	prompt := Prompt(config.ReviewConfig{}, config.PatchConfig{}, state.PullRequest{}, "/tmp/worktree", "/tmp/artifacts", "")
+	for _, expected := range []string{"summaryはコード上の結論だけ", "内部実行情報は含めない", "test未実施や動作未確認だけをfindingにせず"} {
 		if !strings.Contains(prompt, expected) {
 			t.Fatalf("Prompt() does not contain %q: %s", expected, prompt)
 		}
