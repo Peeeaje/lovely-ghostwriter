@@ -29,6 +29,10 @@ type fakeStore struct {
 	updates     map[int]bool
 }
 
+func (f *fakeStore) MarkMissingStale(context.Context, string, []int) error {
+	return nil
+}
+
 func (f *fakeStore) SetCurrentHead(context.Context, string, int, string) error {
 	return nil
 }

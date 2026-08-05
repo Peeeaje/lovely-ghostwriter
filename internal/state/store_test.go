@@ -519,6 +519,45 @@ func TestCurrentStatusHidesRunsFromOlderHeads(t *testing.T) {
 	}
 }
 
+func TestMarkMissingStaleRemovesClosedPullRequestsFromCurrentStatus(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	closed := PullRequest{Repository: "owner/repository", Number: 1, HeadSHA: "closed", BaseBranch: "main", Status: StatusQueued}
+	if _, err := store.UpsertPullRequest(context.Background(), closed); err != nil {
+		t.Fatal(err)
+	}
+	_, run, ok, err := store.ClaimNext(context.Background())
+	if err != nil || !ok {
+		t.Fatalf("ClaimNext() ok=%v err=%v", ok, err)
+	}
+	if err := store.FinishRun(context.Background(), run, StatusFailed, errors.New("failed")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.UpsertPullRequest(context.Background(), PullRequest{
+		Repository: "owner/repository", Number: 2, HeadSHA: "open", BaseBranch: "main", Status: StatusDetected,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.MarkMissingStale(context.Background(), "owner/repository", []int{2}); err != nil {
+		t.Fatal(err)
+	}
+	prs, err := store.PullRequests(context.Background(), false)
+	if err != nil || len(prs) != 1 || prs[0].Number != 2 {
+		t.Fatalf("PullRequests()=%+v err=%v", prs, err)
+	}
+	all, err := store.PullRequests(context.Background(), true)
+	if err != nil || len(all) != 2 {
+		t.Fatalf("PullRequests(all)=%+v err=%v", all, err)
+	}
+	runs, err := store.Runs(context.Background(), false)
+	if err != nil || len(runs) != 0 {
+		t.Fatalf("Runs()=%+v err=%v", runs, err)
+	}
+}
+
 func TestRetargetRunPreservesConcurrentCancel(t *testing.T) {
 	store, err := Open(filepath.Join(t.TempDir(), "state.db"))
 	if err != nil {

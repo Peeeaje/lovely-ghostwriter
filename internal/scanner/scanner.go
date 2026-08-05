@@ -16,6 +16,7 @@ type PullRequestSource interface {
 }
 
 type PullRequestStore interface {
+	MarkMissingStale(context.Context, string, []int) error
 	SetCurrentHead(context.Context, string, int, string) error
 	UpsertPullRequest(context.Context, state.PullRequest) (bool, error)
 	HasPreviousTarget(context.Context, string, int, string, string) (bool, error)
@@ -51,7 +52,9 @@ func (s *Scanner) Scan(ctx context.Context, cfg config.Config) (Result, error) {
 		if err != nil {
 			return result, err
 		}
+		openNumbers := make([]int, 0, len(prs))
 		for _, pr := range prs {
+			openNumbers = append(openNumbers, pr.Number)
 			review := repository.EffectiveReview(cfg.Review)
 			if repository.PatchPullRequest(cfg.Patch, pr.Title, pr.HeadBranch, pr.Author.Login, reviewer, pr.IsCrossRepository) {
 				result.Skipped++
@@ -118,6 +121,9 @@ func (s *Scanner) Scan(ctx context.Context, cfg config.Config) (Result, error) {
 				result.Detected++
 				result.DetectedPullRequests = append(result.DetectedPullRequests, candidate)
 			}
+		}
+		if err := s.store.MarkMissingStale(ctx, repository.Name, openNumbers); err != nil {
+			return result, err
 		}
 	}
 	return result, nil
