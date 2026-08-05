@@ -85,8 +85,12 @@ func submission(result Result, marker, reviewer string, pr state.PullRequest, ru
 		}
 	}
 
+	publicSummary := "最終状態のコード差分と関連コードを確認した範囲では、未解決の指摘事項はありません。"
+	if len(result.Findings) > 0 {
+		publicSummary = "コード差分と関連コードを確認し、未解決の指摘事項を投稿しました。"
+	}
 	body := fmt.Sprintf("自動レビュー判定: %s\n\n- blocking: %d\n- caution: %d\n- nit: %d\n\n%s",
-		result.Decision, counts["blocking"], counts["caution"], counts["nit"], result.Summary)
+		result.Decision, counts["blocking"], counts["caution"], counts["nit"], publicSummary)
 	if len(summaryFindings) > 0 {
 		body += "\n\n" + strings.Join(summaryFindings, "\n")
 	}
