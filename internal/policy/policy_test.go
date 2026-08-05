@@ -10,13 +10,13 @@ import (
 func TestAutomatic(t *testing.T) {
 	repository := config.RepositoryConfig{Reviewers: []string{"reviewer"}}
 	pr := gh.PullRequest{
-		State: "OPEN", HeadSHA: "head", BaseSHA: "base", Author: gh.Actor{Login: "alice"},
+		State: "OPEN", HeadSHA: "head", BaseBranch: "main", BaseSHA: "base", Author: gh.Actor{Login: "alice"},
 		ReviewRequests: []gh.ReviewRequest{{Login: "reviewer"}},
 	}
 	if !Automatic(repository, pr, "marker", "reviewer", config.TriggerReviewRequest) {
 		t.Fatal("Automatic() = false, want true")
 	}
-	pr.Reviews = []gh.Review{{Author: gh.Actor{Login: "reviewer"}, Body: "<!-- marker head=head base=base -->"}}
+	pr.Reviews = []gh.Review{{Author: gh.Actor{Login: "reviewer"}, Body: "<!-- marker head=head base_branch=main base=base -->"}}
 	if Automatic(repository, pr, "marker", "reviewer", config.TriggerReviewRequest) {
 		t.Fatal("Automatic() accepted a reviewed head")
 	}

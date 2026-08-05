@@ -38,12 +38,12 @@ func TestReadResultAndSubmission(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	pr := state.PullRequest{HeadSHA: "abc123", BaseSHA: "base123"}
+	pr := state.PullRequest{HeadSHA: "abc123", BaseBranch: "main", BaseSHA: "base123"}
 	submission := submission(result, "codex-auto-review", "alice", pr, 42, "")
 	if submission.CommitID != "abc123" || len(submission.Comments) != 1 {
 		t.Fatalf("submission = %+v", submission)
 	}
-	if !strings.Contains(submission.Body, "head=abc123 base=base123 run=42") {
+	if !strings.Contains(submission.Body, "head=abc123 base_branch=main base=base123 run=42") {
 		t.Fatalf("submission body lacks run marker: %s", submission.Body)
 	}
 }
@@ -85,7 +85,7 @@ func TestPrepareAutomaticHydratesLegacyTarget(t *testing.T) {
 	}
 }
 
-func TestAutomaticEligibilityTreatsBaseChangeAsUpdate(t *testing.T) {
+func TestAutomaticEligibilityDoesNotTreatBaseChangeAsUpdate(t *testing.T) {
 	cfg := config.Default()
 	cfg.Repositories[0].Reviewers = []string{"reviewer"}
 	cfg.Repositories[0].InitialTrigger = config.TriggerAlways
@@ -104,7 +104,7 @@ func TestAutomaticEligibilityTreatsBaseChangeAsUpdate(t *testing.T) {
 	eligible, err := runner.automaticEligible(context.Background(), cfg.Repositories[0], gh.PullRequest{
 		Number: 1, State: "OPEN", HeadSHA: "old", BaseBranch: "main", BaseSHA: "new-base", Author: gh.Actor{Login: "alice"}, ReviewRequests: []gh.ReviewRequest{{Login: "reviewer"}},
 	})
-	if err != nil || eligible {
+	if err != nil || !eligible {
 		t.Fatalf("automaticEligible() eligible=%v err=%v", eligible, err)
 	}
 }
@@ -112,9 +112,9 @@ func TestAutomaticEligibilityTreatsBaseChangeAsUpdate(t *testing.T) {
 func TestRecoveredReviewPostedUsesPreviousRunMarker(t *testing.T) {
 	cfg := config.Default()
 	runner := Runner{Config: cfg, GitHub: fakeGitHub{pr: gh.PullRequest{
-		Reviews: []gh.Review{{Author: gh.Actor{Login: "reviewer"}, Body: "<!-- codex-auto-review reviewer=reviewer head=head base=base run=41 -->"}},
+		Reviews: []gh.Review{{Author: gh.Actor{Login: "reviewer"}, Body: "<!-- codex-auto-review reviewer=reviewer head=head base_branch=main base=base run=41 -->"}},
 	}}}
-	posted, err := runner.RecoveredReviewPosted(context.Background(), cfg.Repositories[0], state.PullRequest{HeadSHA: "head", BaseSHA: "base", RecoveryRunID: 41})
+	posted, err := runner.RecoveredReviewPosted(context.Background(), cfg.Repositories[0], state.PullRequest{HeadSHA: "head", BaseBranch: "main", BaseSHA: "base", RecoveryRunID: 41})
 	if err != nil || !posted {
 		t.Fatalf("RecoveredReviewPosted() posted=%v err=%v", posted, err)
 	}

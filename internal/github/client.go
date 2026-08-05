@@ -136,25 +136,25 @@ func (c *Client) PullRequest(ctx context.Context, repository string, number int)
 	return pr, nil
 }
 
-func HasMarker(pr PullRequest, marker, headSHA, baseSHA, reviewer string) bool {
+func HasMarker(pr PullRequest, marker, headSHA, baseBranch, reviewer string) bool {
 	markerPrefix := "<!-- " + marker + " "
 	headAttribute := "head=" + headSHA + " "
-	baseAttribute := "base=" + baseSHA + " "
+	baseBranchAttribute := "base_branch=" + baseBranch + " "
 	for _, review := range pr.Reviews {
-		if review.Author.Login == reviewer && strings.Contains(review.Body, markerPrefix) && strings.Contains(review.Body, headAttribute) && strings.Contains(review.Body, baseAttribute) {
+		if review.Author.Login == reviewer && strings.Contains(review.Body, markerPrefix) && strings.Contains(review.Body, headAttribute) && strings.Contains(review.Body, baseBranchAttribute) {
 			return true
 		}
 	}
 	return false
 }
 
-func HasRunMarker(pr PullRequest, marker, headSHA, baseSHA, reviewer string, runID int64) bool {
+func HasRunMarker(pr PullRequest, marker, headSHA, baseBranch, reviewer string, runID int64) bool {
 	markerPrefix := "<!-- " + marker + " "
 	headAttribute := "head=" + headSHA + " "
-	baseAttribute := "base=" + baseSHA + " "
+	baseBranchAttribute := "base_branch=" + baseBranch + " "
 	runAttribute := "run=" + strconv.FormatInt(runID, 10) + " "
 	for _, review := range pr.Reviews {
-		if review.Author.Login == reviewer && strings.Contains(review.Body, markerPrefix) && strings.Contains(review.Body, headAttribute) && strings.Contains(review.Body, baseAttribute) && strings.Contains(review.Body, runAttribute) {
+		if review.Author.Login == reviewer && strings.Contains(review.Body, markerPrefix) && strings.Contains(review.Body, headAttribute) && strings.Contains(review.Body, baseBranchAttribute) && strings.Contains(review.Body, runAttribute) {
 			return true
 		}
 	}

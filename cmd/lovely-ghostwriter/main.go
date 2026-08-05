@@ -211,10 +211,10 @@ func status(ctx context.Context, opts options, args []string, out io.Writer) err
 	}
 	for _, run := range runs {
 		fmt.Fprintf(out, "  run=%d %s#%d [%s] attempt=%d\n", run.ID, run.Repository, run.Number, run.Status, run.Attempt)
-		if run.LogPath != "" {
+		if _, err := os.Stat(run.LogPath); run.LogPath != "" && err == nil {
 			fmt.Fprintf(out, "    log=%s\n", run.LogPath)
 		}
-		if run.ArtifactPath != "" {
+		if _, err := os.Stat(run.ArtifactPath); run.ArtifactPath != "" && err == nil {
 			fmt.Fprintf(out, "    artifacts=%s\n", run.ArtifactPath)
 		}
 		if run.Error != "" {
@@ -497,7 +497,7 @@ func enqueue(ctx context.Context, opts options, args []string, out io.Writer) er
 		return err
 	}
 	review := repositoryConfig.EffectiveReview(cfg.Review)
-	if gh.HasMarker(pr, review.Marker, pr.HeadSHA, pr.BaseSHA, reviewer) && !force {
+	if gh.HasMarker(pr, review.Marker, pr.HeadSHA, pr.BaseBranch, reviewer) && !force {
 		return fmt.Errorf("pull request %s already has a review marker for head %s; use --force to rerun", ref, pr.HeadSHA)
 	}
 	queued, err := store.Enqueue(ctx, state.PullRequest{
