@@ -114,6 +114,8 @@ An empty `authors` list allows every author except `exclude_authors`. With the d
 
 `initial_trigger` and `update_trigger` accept `review-request`, `always`, or `manual`. The default keeps both phases gated by a matching GitHub review request.
 
+`workspace-write` confines Codex to the review artifacts and worktree. Checks that need resources outside those directories, including a host Docker socket, may require `danger-full-access`. See [Troubleshooting](docs/troubleshooting.md#docker-works-in-the-terminal-but-not-in-a-review).
+
 Append trusted review guidance with `review.instructions`. Each repository can override review settings without changing the global defaults:
 
 ```toml
@@ -196,6 +198,8 @@ lovely-ghostwriter service uninstall
 ```
 
 The service is restarted by `launchd` after a crash and starts again after login. Each daemon scan also starts queued reviews up to `max_concurrency`.
+
+After changing `config.toml`, restart the daemon so new review processes use the updated settings. See [Troubleshooting](docs/troubleshooting.md#configuration-changes-do-not-take-effect).
 
 ## State
 
