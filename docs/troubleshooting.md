@@ -16,19 +16,30 @@ docker version
 
 If that succeeds, check `review.sandbox` and `patch.sandbox`. The default
 `workspace-write` sandbox allows writes to the review artifacts and worktree,
-but a host Docker socket normally lives outside both. Use
-`danger-full-access` for stages that must run container-based checks:
+but a host Docker socket may live outside both. Keep `workspace-write` and add
+the socket directory explicitly. `extra_args` does not expand `~`, so use an
+absolute path:
 
 ```toml
 [review]
-sandbox = "danger-full-access"
+sandbox = "workspace-write"
+extra_args = ["--add-dir", "/Users/alice/.orbstack/run"]
 
 [patch]
-sandbox = "danger-full-access"
+sandbox = "workspace-write"
+extra_args = ["--add-dir", "/Users/alice/.orbstack/run"]
 ```
 
-Docker socket access effectively gives the review process broad control over
-the host. Only enable it for repositories and prompts you trust.
+Docker socket access still gives the review process broad control through
+Docker. Only enable it for repositories and prompts you trust. Use
+`danger-full-access` only when a required tool cannot work with an explicit
+directory grant.
+
+Reviews should not recursively search the user's home directory. Apart from
+being unrelated to the pull request, this can trigger repeated macOS privacy
+prompts for Desktop, Documents, or Downloads. Keep repository discovery inside
+the dedicated worktree and put any required external path in repository
+instructions explicitly.
 
 ## Configuration changes do not take effect
 

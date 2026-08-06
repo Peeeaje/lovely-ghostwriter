@@ -114,7 +114,7 @@ An empty `authors` list allows every author except `exclude_authors`. With the d
 
 `initial_trigger` and `update_trigger` accept `review-request`, `always`, or `manual`. The default keeps both phases gated by a matching GitHub review request.
 
-`workspace-write` confines Codex to the review artifacts and worktree. Checks that need resources outside those directories, including a host Docker socket, may require `danger-full-access`. See [Troubleshooting](docs/troubleshooting.md#docker-works-in-the-terminal-but-not-in-a-review).
+`workspace-write` confines writes to the review artifacts and worktree. A host Docker socket outside those directories can be exposed explicitly with `extra_args` instead of granting unrestricted access. See [Troubleshooting](docs/troubleshooting.md#docker-works-in-the-terminal-but-not-in-a-review).
 
 Append trusted review guidance with `review.instructions`. Each repository can override review settings without changing the global defaults:
 

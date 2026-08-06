@@ -191,7 +191,7 @@ func TestPromptExplainsOptionalPatchOrchestration(t *testing.T) {
 
 func TestPromptKeepsInternalExecutionDetailsOutOfPublicSummary(t *testing.T) {
 	prompt := Prompt(config.ReviewConfig{}, config.PatchConfig{}, state.PullRequest{}, "/tmp/worktree", "/tmp/artifacts", "")
-	for _, expected := range []string{"summaryはコード上の結論だけ", "内部実行情報は含めない", "test未実施や動作未確認だけをfindingにせず"} {
+	for _, expected := range []string{"summaryはコード上の結論だけ", "内部実行情報は含めない", "test未実施や動作未確認だけをfindingにせず", "home directoryやその親を対象にしたrg/find/grep/ls", "Desktop/Documents/Downloadsの直接参照は禁止"} {
 		if !strings.Contains(prompt, expected) {
 			t.Fatalf("Prompt() does not contain %q: %s", expected, prompt)
 		}
