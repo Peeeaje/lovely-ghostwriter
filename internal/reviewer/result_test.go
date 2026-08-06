@@ -67,6 +67,40 @@ func TestSubmissionWithoutFindingsFocusesOnCodeConclusion(t *testing.T) {
 	}
 }
 
+func TestSubmissionWithPatchReportsProposedUntilMerged(t *testing.T) {
+	result := Result{
+		Decision: "NO_BLOCKING_FINDINGS",
+		Summary:  "The patched worktree has no unresolved findings.",
+	}
+	submission := submission(result, "codex-auto-review", "alice", state.PullRequest{HeadSHA: "abc123", BaseBranch: "main", BaseSHA: "base123"}, 42, "https://example.com/patch/1")
+	for _, expected := range []string{
+		"自動レビュー判定: PATCH_PROPOSED",
+		"元PRへ取り込まれるまで、対象headでは未解消です。",
+		"Patch PR: https://example.com/patch/1",
+	} {
+		if !strings.Contains(submission.Body, expected) {
+			t.Fatalf("submission body does not contain %q: %s", expected, submission.Body)
+		}
+	}
+	for _, misleading := range []string{"自動レビュー判定: NO_BLOCKING_FINDINGS", "- blocking: 0"} {
+		if strings.Contains(submission.Body, misleading) {
+			t.Fatalf("submission body contains misleading result %q: %s", misleading, submission.Body)
+		}
+	}
+}
+
+func TestSubmissionWithPatchReportsRemainingFindings(t *testing.T) {
+	result := Result{
+		Decision: "CAUTION",
+		Summary:  "One caution remains after patching.",
+		Findings: []Finding{{Severity: "caution", Body: "Confirm this.", Path: "main.go", Line: 12, Side: "RIGHT"}},
+	}
+	submission := submission(result, "codex-auto-review", "alice", state.PullRequest{HeadSHA: "abc123", BaseBranch: "main", BaseSHA: "base123"}, 42, "https://example.com/patch/1")
+	if !strings.Contains(submission.Body, "Patch適用後も残るfinding:") || !strings.Contains(submission.Body, "- caution: 1") {
+		t.Fatalf("submission body lacks remaining finding counts: %s", submission.Body)
+	}
+}
+
 func TestCurrentTarget(t *testing.T) {
 	target := state.PullRequest{HeadSHA: "head", BaseSHA: "base", BaseBranch: "main"}
 	if err := currentTarget(gh.PullRequest{State: "OPEN", HeadSHA: "head", BaseSHA: "base", BaseBranch: "main"}, target); err != nil {
