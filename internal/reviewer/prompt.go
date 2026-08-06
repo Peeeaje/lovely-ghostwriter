@@ -44,6 +44,7 @@ base SHA側のrepository指示を開発手順として読み、変更に適し�
 Codexのproject rootは信頼済みartifact directoryです。レビュー対象は上記の専用detached worktreeだけです。
 git commandは必ずgit -C <dedicated worktree>の形で実行し、base SHA...target head SHAを比較してください。
 artifact directoryのpr-context.jsonにある既存reviewsと、base SHA...target head SHAのdiff、関連コード、testsを確認してください。
+専用worktree、artifact directory、前回artifact以外を再帰的に探索しないでください。特にhome directoryやその親を対象にしたrg/find/grep/lsと、Desktop/Documents/Downloadsの直接参照は禁止です。repositoryが宣言するtoolchainやcacheは実行時に利用できますが、そこを調査対象として走査しないでください。
 既に指摘済みの内容を重複させないでください。
 コードスタイルの好みではなく、実害のあるbug、regression、security、data integrity、重要なtest不足を優先してください。
 
