@@ -134,7 +134,7 @@ enabled = true
 instructions = "Run the repository's required checks and clean up resources started by the review."
 ```
 
-Patch mode asks Codex to orchestrate review, patchable blocking fixes, and re-review in the dedicated worktree. The host process checks the current head before creating one patch pull request. The review remains `PATCH_PROPOSED` until that patch is incorporated into the original pull request. Cross-repository pull requests remain review-only.
+Patch mode asks Codex to orchestrate review, patchable blocking fixes, and re-review in the dedicated worktree. The host process checks the current head before creating one patch pull request. Both the original review and patch pull request describe each detected problem and the corresponding fix. A review remains `PATCH_PROPOSED` until that patch is incorporated into the original pull request. Cross-repository pull requests remain review-only.
 
 On macOS, `notification.command = "auto"` prefers `terminal-notifier` and falls back to `osascript`. Started, finished, and failed notifications include the pull request title. A newly detected pull request outside `base_branches` also sends one notification; a single-item notification opens the pull request when clicked. `notification.timeout` prevents a broken notifier from blocking review workers.
 
