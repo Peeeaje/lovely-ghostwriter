@@ -136,6 +136,8 @@ instructions = "Run the repository's required checks and clean up resources star
 
 Patch mode asks Codex to orchestrate review, patchable blocking fixes, and re-review in the dedicated worktree. The host process checks the current head before creating one patch pull request. Both the original review and patch pull request describe each detected problem and the corresponding fix. A review remains `PATCH_PROPOSED` until that patch is incorporated into the original pull request. Cross-repository pull requests remain review-only.
 
+Review processes share Codex authentication but ignore the interactive user's Codex configuration. This keeps desktop notification hooks, plugins, memories, MCP servers, and unrelated personal settings out of unattended reviews. The daemon supplies its model, reasoning effort, sandbox, and multi-agent settings explicitly.
+
 On macOS, `notification.command = "auto"` prefers `terminal-notifier` and falls back to `osascript`. Started, finished, and failed notifications include the pull request title. A newly detected pull request outside `base_branches` also sends one notification; a single-item notification opens the pull request when clicked. `notification.timeout` prevents a broken notifier from blocking review workers.
 
 Validate the local environment before starting the daemon:

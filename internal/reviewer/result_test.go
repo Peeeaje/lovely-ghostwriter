@@ -243,6 +243,29 @@ func TestPromptKeepsInternalExecutionDetailsOutOfPublicSummary(t *testing.T) {
 	}
 }
 
+func TestReviewCommandIgnoresInteractiveUserConfiguration(t *testing.T) {
+	args := reviewCommandArgs(reviewCommand{
+		Model:           "review-model",
+		ReasoningEffort: "high",
+		Sandbox:         "workspace-write",
+		ExtraArgs:       []string{"--add-dir", "/docker-socket"},
+	}, "/artifacts", "/worktree", "/schema.json", "/result.json")
+	joined := strings.Join(args, " ")
+	for _, expected := range []string{
+		"--ignore-user-config",
+		"--enable multi_agent",
+		"--enable child_agents_md",
+		"--model review-model",
+		`model_reasoning_effort="high"`,
+		"--sandbox workspace-write",
+		"--add-dir /docker-socket",
+	} {
+		if !strings.Contains(joined, expected) {
+			t.Fatalf("review command does not contain %q: %s", expected, joined)
+		}
+	}
+}
+
 func TestPatchValidationRejectsChangedWorktreeAndRemoteHead(t *testing.T) {
 	root := t.TempDir()
 	remote := filepath.Join(root, "remote.git")
