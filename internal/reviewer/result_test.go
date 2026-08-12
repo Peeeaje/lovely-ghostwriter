@@ -30,6 +30,7 @@ func TestReadResultAndSubmission(t *testing.T) {
 	result, err := readResult([]byte(`{
   "decision": "BLOCKING",
   "summary": "One issue was found.",
+  "patched_findings": [],
   "findings": [
     {"severity":"blocking","body":"Fix this.","path":"main.go","line":12,"side":"RIGHT"},
     {"severity":"caution","body":"Confirm the contract.","path":"","line":0,"side":"RIGHT"}
@@ -71,18 +72,25 @@ func TestSubmissionWithPatchReportsProposedUntilMerged(t *testing.T) {
 	result := Result{
 		Decision: "NO_BLOCKING_FINDINGS",
 		Summary:  "The patched worktree has no unresolved findings.",
+		PatchedFindings: []PatchedFinding{{
+			Problem: "Required CI can pass when change detection fails.",
+			Fix:     "Run the required job and fail it when change detection does not succeed.",
+		}},
 	}
 	submission := submission(result, "codex-auto-review", "alice", state.PullRequest{HeadSHA: "abc123", BaseBranch: "main", BaseSHA: "base123"}, 42, "https://example.com/patch/1")
 	for _, expected := range []string{
 		"自動レビュー判定: PATCH_PROPOSED",
+		"- blocking: 1",
 		"元PRへ取り込まれるまで、対象headでは未解消です。",
+		"**問題**: Required CI can pass when change detection fails.",
+		"**修正**: Run the required job and fail it when change detection does not succeed.",
 		"Patch PR: https://example.com/patch/1",
 	} {
 		if !strings.Contains(submission.Body, expected) {
 			t.Fatalf("submission body does not contain %q: %s", expected, submission.Body)
 		}
 	}
-	for _, misleading := range []string{"自動レビュー判定: NO_BLOCKING_FINDINGS", "- blocking: 0"} {
+	for _, misleading := range []string{"自動レビュー判定: NO_BLOCKING_FINDINGS", "- blocking: 0", result.Summary} {
 		if strings.Contains(submission.Body, misleading) {
 			t.Fatalf("submission body contains misleading result %q: %s", misleading, submission.Body)
 		}
@@ -94,10 +102,47 @@ func TestSubmissionWithPatchReportsRemainingFindings(t *testing.T) {
 		Decision: "CAUTION",
 		Summary:  "One caution remains after patching.",
 		Findings: []Finding{{Severity: "caution", Body: "Confirm this.", Path: "main.go", Line: 12, Side: "RIGHT"}},
+		PatchedFindings: []PatchedFinding{{
+			Problem: "A required check could be skipped.",
+			Fix:     "Make the required check fail closed.",
+		}},
 	}
 	submission := submission(result, "codex-auto-review", "alice", state.PullRequest{HeadSHA: "abc123", BaseBranch: "main", BaseSHA: "base123"}, 42, "https://example.com/patch/1")
-	if !strings.Contains(submission.Body, "Patch適用後も残るfinding:") || !strings.Contains(submission.Body, "- caution: 1") {
+	if strings.Contains(submission.Body, "Patch適用後も残るfinding") || !strings.Contains(submission.Body, "- caution: 1") {
 		t.Fatalf("submission body lacks remaining finding counts: %s", submission.Body)
+	}
+}
+
+func TestReadResultRejectsIncompletePatchedFinding(t *testing.T) {
+	_, err := readResult([]byte(`{
+  "decision": "NO_BLOCKING_FINDINGS",
+  "summary": "The patch resolves the issue.",
+  "findings": [],
+  "patched_findings": [{"problem":"Required CI can be skipped.","fix":""}]
+}`))
+	if err == nil || !strings.Contains(err.Error(), "empty fix") {
+		t.Fatalf("readResult() error = %v", err)
+	}
+}
+
+func TestPatchPullRequestBodyExplainsProblemAndFix(t *testing.T) {
+	body := patchPullRequestBody(state.PullRequest{
+		Number: 123, URL: "https://example.com/pull/123", HeadSHA: "abc123",
+	}, []PatchedFinding{{
+		Problem: "Required CI can pass when change detection fails.",
+		Fix:     "Fail the required job when change detection fails.",
+	}})
+	for _, expected := range []string{
+		"元PR: https://example.com/pull/123",
+		"対象head: `abc123`",
+		"## 問題",
+		"Required CI can pass when change detection fails.",
+		"## 修正内容",
+		"Fail the required job when change detection fails.",
+	} {
+		if !strings.Contains(body, expected) {
+			t.Fatalf("patch pull request body does not contain %q: %s", expected, body)
+		}
 	}
 }
 
@@ -182,7 +227,7 @@ func TestPromptIncludesAdditionalInstructions(t *testing.T) {
 
 func TestPromptExplainsOptionalPatchOrchestration(t *testing.T) {
 	prompt := Prompt(config.ReviewConfig{}, config.PatchConfig{Enabled: true, MaxIterations: 2}, state.PullRequest{}, "/tmp/worktree", "/tmp/artifacts", "/tmp/previous")
-	for _, expected := range []string{"review -> patchable blocking", "最大2回", "/tmp/previous", "現在のheadで必ず再検証"} {
+	for _, expected := range []string{"review -> patchable blocking", "最大2回", "patched_findings", "problemにコード上の具体的な問題と影響", "fixに実施した修正", "/tmp/previous", "現在のheadで必ず再検証"} {
 		if !strings.Contains(prompt, expected) {
 			t.Fatalf("Prompt() does not contain %q: %s", expected, prompt)
 		}

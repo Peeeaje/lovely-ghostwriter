@@ -280,7 +280,7 @@ func (r *Runner) Run(ctx context.Context, repository config.RepositoryConfig, pr
 			continue
 		}
 		operationCtx, stopOperation, operationStopped := r.monitoredContext(ctx, pr)
-		patchURL, err := r.createPatchPullRequest(operationCtx, patch, pr, current, worktreePath, artifactPath)
+		patchURL, err := r.createPatchPullRequest(operationCtx, patch, pr, current, worktreePath, artifactPath, result.PatchedFindings)
 		stopOperation()
 		if err != nil {
 			select {
@@ -614,8 +614,11 @@ func saveWorktreeDiff(artifactPath, worktreePath string) {
 	}
 }
 
-func (r *Runner) createPatchPullRequest(ctx context.Context, patch config.PatchConfig, pr state.PullRequest, current gh.PullRequest, worktreePath, artifactPath string) (string, error) {
+func (r *Runner) createPatchPullRequest(ctx context.Context, patch config.PatchConfig, pr state.PullRequest, current gh.PullRequest, worktreePath, artifactPath string, patchedFindings []PatchedFinding) (string, error) {
 	if !patch.Enabled {
+		if len(patchedFindings) > 0 {
+			return "", errors.New("review result has patched findings while patch mode is disabled")
+		}
 		return "", nil
 	}
 	if err := validatePatchWorktree(ctx, worktreePath, pr.HeadSHA); err != nil {
@@ -626,7 +629,13 @@ func (r *Runner) createPatchPullRequest(ctx context.Context, patch config.PatchC
 		return "", err
 	}
 	if strings.TrimSpace(status) == "" {
+		if len(patchedFindings) > 0 {
+			return "", errors.New("review result has patched findings but patch worktree has no changes")
+		}
 		return "", nil
+	}
+	if len(patchedFindings) == 0 {
+		return "", errors.New("patch worktree has changes but review result has no patched findings")
 	}
 	if _, err := git(ctx, worktreePath, "add", "-A"); err != nil {
 		return "", err
@@ -655,7 +664,7 @@ func (r *Runner) createPatchPullRequest(ctx context.Context, patch config.PatchC
 		return existingPullRequest.URL, nil
 	}
 	bodyPath := filepath.Join(artifactPath, "patch-pr-body.md")
-	body := fmt.Sprintf("Automated patch for #%d.\n\nThe changes address patchable blocking findings found during review. Review and merge this pull request independently.\n", pr.Number)
+	body := patchPullRequestBody(pr, patchedFindings)
 	if err := os.WriteFile(bodyPath, []byte(body), 0o644); err != nil {
 		return "", fmt.Errorf("write patch pull request body: %w", err)
 	}
@@ -718,6 +727,20 @@ func (r *Runner) createPatchPullRequest(ctx context.Context, patch config.PatchC
 	url := createdPullRequest.URL
 	_ = os.WriteFile(filepath.Join(artifactPath, "patch-pr-url.txt"), []byte(url+"\n"), 0o644)
 	return url, nil
+}
+
+func patchPullRequestBody(pr state.PullRequest, findings []PatchedFinding) string {
+	var body strings.Builder
+	fmt.Fprintf(&body, "#%dの自動レビューで検出したblocking findingを修正します。\n\n元PR: %s\n対象head: `%s`\n\n## 問題\n", pr.Number, pr.URL, pr.HeadSHA)
+	for i, finding := range findings {
+		fmt.Fprintf(&body, "\n%d. %s\n", i+1, finding.Problem)
+	}
+	body.WriteString("\n## 修正内容\n")
+	for i, finding := range findings {
+		fmt.Fprintf(&body, "\n%d. %s\n", i+1, finding.Fix)
+	}
+	body.WriteString("\n元PRとは別に内容を確認した上で、必要に応じて取り込んでください。\n")
+	return body.String()
 }
 
 func findPatchPullRequest(ctx context.Context, repository, branch, owner, baseBranch string) (patchPullRequest, bool, error) {

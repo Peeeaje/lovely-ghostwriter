@@ -11,9 +11,15 @@ import (
 )
 
 type Result struct {
-	Decision string    `json:"decision"`
-	Summary  string    `json:"summary"`
-	Findings []Finding `json:"findings"`
+	Decision        string           `json:"decision"`
+	Summary         string           `json:"summary"`
+	Findings        []Finding        `json:"findings"`
+	PatchedFindings []PatchedFinding `json:"patched_findings"`
+}
+
+type PatchedFinding struct {
+	Problem string `json:"problem"`
+	Fix     string `json:"fix"`
 }
 
 type Finding struct {
@@ -29,7 +35,7 @@ func outputSchema() []byte {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "type": "object",
   "additionalProperties": false,
-  "required": ["decision", "summary", "findings"],
+  "required": ["decision", "summary", "findings", "patched_findings"],
   "properties": {
     "decision": {"type": "string", "enum": ["BLOCKING", "CAUTION", "NO_BLOCKING_FINDINGS"]},
     "summary": {"type": "string"},
@@ -45,6 +51,18 @@ func outputSchema() []byte {
           "path": {"type": "string"},
           "line": {"type": "integer", "minimum": 0},
           "side": {"type": "string", "enum": ["RIGHT", "LEFT"]}
+        }
+      }
+    },
+    "patched_findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["problem", "fix"],
+        "properties": {
+          "problem": {"type": "string", "minLength": 1},
+          "fix": {"type": "string", "minLength": 1}
         }
       }
     }
@@ -68,6 +86,14 @@ func readResult(data []byte) (Result, error) {
 			return Result{}, fmt.Errorf("finding %d must set both path and line, or neither", i+1)
 		}
 	}
+	for i, finding := range result.PatchedFindings {
+		if strings.TrimSpace(finding.Problem) == "" {
+			return Result{}, fmt.Errorf("patched finding %d has an empty problem", i+1)
+		}
+		if strings.TrimSpace(finding.Fix) == "" {
+			return Result{}, fmt.Errorf("patched finding %d has an empty fix", i+1)
+		}
+	}
 	return result, nil
 }
 
@@ -87,10 +113,15 @@ func submission(result Result, marker, reviewer string, pr state.PullRequest, ru
 
 	var body string
 	if patchURL != "" {
-		body = "自動レビュー判定: PATCH_PROPOSED\n\nBlocking findingへの修正をpatch PRで提案しています。元PRへ取り込まれるまで、対象headでは未解消です。"
-		if len(result.Findings) > 0 {
-			body += fmt.Sprintf("\n\nPatch適用後も残るfinding:\n\n- blocking: %d\n- caution: %d\n- nit: %d",
-				counts["blocking"], counts["caution"], counts["nit"])
+		counts["blocking"] += len(result.PatchedFindings)
+		body = fmt.Sprintf("自動レビュー判定: PATCH_PROPOSED\n\n- blocking: %d\n- caution: %d\n- nit: %d\n\n今回検出したblockingは、patch PRで解消見込みです。元PRへ取り込まれるまで、対象headでは未解消です。",
+			counts["blocking"], counts["caution"], counts["nit"])
+		body += "\n\n### 問題と修正"
+		for i, finding := range result.PatchedFindings {
+			body += fmt.Sprintf("\n\n%d. **問題**: %s\n   **修正**: %s", i+1, finding.Problem, finding.Fix)
+		}
+		if len(summaryFindings) > 0 {
+			body += "\n\n### Patch適用後も残るfinding"
 		}
 	} else {
 		publicSummary := "最終状態のコード差分と関連コードを確認した範囲では、未解決の指摘事項はありません。"
