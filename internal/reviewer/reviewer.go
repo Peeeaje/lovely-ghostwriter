@@ -439,23 +439,7 @@ func (r *Runner) reviewTarget(ctx context.Context, review config.ReviewConfig, p
 	if patch.Enabled {
 		commandConfig = reviewCommand{Command: patch.Command, Model: patch.Model, ReasoningEffort: patch.ReasoningEffort, Sandbox: patch.Sandbox, ExtraArgs: patch.ExtraArgs}
 	}
-	args := []string{
-		"exec", "--ephemeral",
-		"-C", artifactPath,
-		"--add-dir", worktreePath,
-		"--skip-git-repo-check",
-		"--sandbox", commandConfig.Sandbox,
-		"--output-schema", schemaPath,
-		"--output-last-message", resultPath,
-	}
-	if commandConfig.ReasoningEffort != "" {
-		args = append(args, "-c", "model_reasoning_effort="+strconv.Quote(commandConfig.ReasoningEffort))
-	}
-	if commandConfig.Model != "" {
-		args = append(args, "--model", commandConfig.Model)
-	}
-	args = append(args, commandConfig.ExtraArgs...)
-	args = append(args, "-")
+	args := reviewCommandArgs(commandConfig, artifactPath, worktreePath, schemaPath, resultPath)
 
 	commandCtx, stop, stopped := r.monitoredContext(ctx, pr)
 	defer stop()
@@ -490,6 +474,28 @@ func (r *Runner) reviewTarget(ctx context.Context, review config.ReviewConfig, p
 		return result, state.StatusCompleted, nil
 	}
 	return result, state.StatusRunning, nil
+}
+
+func reviewCommandArgs(command reviewCommand, artifactPath, worktreePath, schemaPath, resultPath string) []string {
+	args := []string{
+		"exec", "--ephemeral", "--ignore-user-config",
+		"--enable", "multi_agent",
+		"--enable", "child_agents_md",
+		"-C", artifactPath,
+		"--add-dir", worktreePath,
+		"--skip-git-repo-check",
+		"--sandbox", command.Sandbox,
+		"--output-schema", schemaPath,
+		"--output-last-message", resultPath,
+	}
+	if command.ReasoningEffort != "" {
+		args = append(args, "-c", "model_reasoning_effort="+strconv.Quote(command.ReasoningEffort))
+	}
+	if command.Model != "" {
+		args = append(args, "--model", command.Model)
+	}
+	args = append(args, command.ExtraArgs...)
+	return append(args, "-")
 }
 
 func configureProcessGroup(command *exec.Cmd) {
