@@ -253,8 +253,6 @@ func TestReviewCommandIgnoresInteractiveUserConfiguration(t *testing.T) {
 	joined := strings.Join(args, " ")
 	for _, expected := range []string{
 		"--ignore-user-config",
-		"--enable multi_agent",
-		"--enable child_agents_md",
 		"--model review-model",
 		`model_reasoning_effort="high"`,
 		"--sandbox workspace-write",
@@ -263,6 +261,9 @@ func TestReviewCommandIgnoresInteractiveUserConfiguration(t *testing.T) {
 		if !strings.Contains(joined, expected) {
 			t.Fatalf("review command does not contain %q: %s", expected, joined)
 		}
+	}
+	if strings.Contains(joined, "--enable") {
+		t.Fatalf("review command pins Codex feature flags: %s", joined)
 	}
 }
 
