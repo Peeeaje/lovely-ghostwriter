@@ -479,8 +479,6 @@ func (r *Runner) reviewTarget(ctx context.Context, review config.ReviewConfig, p
 func reviewCommandArgs(command reviewCommand, artifactPath, worktreePath, schemaPath, resultPath string) []string {
 	args := []string{
 		"exec", "--ephemeral", "--ignore-user-config",
-		"--enable", "multi_agent",
-		"--enable", "child_agents_md",
 		"-C", artifactPath,
 		"--add-dir", worktreePath,
 		"--skip-git-repo-check",
