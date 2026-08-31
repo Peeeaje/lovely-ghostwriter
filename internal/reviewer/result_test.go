@@ -44,6 +44,9 @@ func TestReadResultAndSubmission(t *testing.T) {
 	if submission.CommitID != "abc123" || len(submission.Comments) != 1 {
 		t.Fatalf("submission = %+v", submission)
 	}
+	if submission.Event != "COMMENT" {
+		t.Fatalf("blocking submission event = %q", submission.Event)
+	}
 	if !strings.Contains(submission.Body, "head=abc123 base_branch=main base=base123 run=42") {
 		t.Fatalf("submission body lacks run marker: %s", submission.Body)
 	}
@@ -58,6 +61,9 @@ func TestSubmissionWithoutFindingsFocusesOnCodeConclusion(t *testing.T) {
 		Summary:  "独立Review役も同じ結論です。全テストが合格し、artifactへ保存してDockerを削除しました。ブラウザ確認は未実施です。",
 	}
 	submission := submission(result, "codex-auto-review", "alice", state.PullRequest{HeadSHA: "abc123", BaseBranch: "main", BaseSHA: "base123"}, 42, "")
+	if submission.Event != "APPROVE" {
+		t.Fatalf("submission event = %q, want APPROVE", submission.Event)
+	}
 	if !strings.Contains(submission.Body, "最終状態のコード差分と関連コードを確認した範囲では、未解決の指摘事項はありません。") {
 		t.Fatalf("submission body lacks the code conclusion: %s", submission.Body)
 	}
@@ -65,6 +71,14 @@ func TestSubmissionWithoutFindingsFocusesOnCodeConclusion(t *testing.T) {
 		if strings.Contains(submission.Body, internalDetail) {
 			t.Fatalf("submission body contains internal detail %q: %s", internalDetail, submission.Body)
 		}
+	}
+}
+
+func TestSubmissionDoesNotApproveReviewersOwnPullRequest(t *testing.T) {
+	result := Result{Decision: "NO_BLOCKING_FINDINGS", Summary: "No findings."}
+	submission := submission(result, "codex-auto-review", "alice", state.PullRequest{Author: "alice", HeadSHA: "abc123", BaseBranch: "main"}, 42, "")
+	if submission.Event != "COMMENT" {
+		t.Fatalf("own pull request submission event = %q, want COMMENT", submission.Event)
 	}
 }
 

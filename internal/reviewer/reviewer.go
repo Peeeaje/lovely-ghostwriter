@@ -279,6 +279,17 @@ func (r *Runner) Run(ctx context.Context, repository config.RepositoryConfig, pr
 			previousArtifact = artifactPath
 			continue
 		}
+		reviewer, err := r.GitHub.CurrentUser(ctx)
+		if err != nil {
+			return run, pr, state.StatusFailed, err
+		}
+		if gh.HasMarker(current, review.Marker, pr.HeadSHA, pr.BaseBranch, reviewer) {
+			writeStopArtifact(artifactPath, "duplicate-stop.md", "review already exists for the current head")
+			if notifyErr := r.notifyDuplicatePrevented(context.Background(), pr); notifyErr != nil {
+				writeStopArtifact(artifactPath, "notification-error.md", notifyErr.Error())
+			}
+			return run, pr, state.StatusReviewed, nil
+		}
 		operationCtx, stopOperation, operationStopped := r.monitoredContext(ctx, pr)
 		patchURL, err := r.createPatchPullRequest(operationCtx, patch, pr, current, worktreePath, artifactPath, result.PatchedFindings)
 		stopOperation()
@@ -334,9 +345,18 @@ func (r *Runner) Run(ctx context.Context, repository config.RepositoryConfig, pr
 			previousArtifact = artifactPath
 			continue
 		}
-		reviewer, err := r.GitHub.CurrentUser(ctx)
-		if err != nil {
-			return run, pr, state.StatusFailed, err
+		if gh.HasMarker(latest, review.Marker, pr.HeadSHA, pr.BaseBranch, reviewer) {
+			if patchURL != "" {
+				if err := closePatchPullRequest(context.Background(), patchURL); err != nil {
+					writeStopArtifact(artifactPath, "patch-close-error.md", err.Error())
+					return run, pr, state.StatusFailed, err
+				}
+			}
+			writeStopArtifact(artifactPath, "duplicate-stop.md", "review appeared while preparing submission")
+			if notifyErr := r.notifyDuplicatePrevented(context.Background(), pr); notifyErr != nil {
+				writeStopArtifact(artifactPath, "notification-error.md", notifyErr.Error())
+			}
+			return run, pr, state.StatusReviewed, nil
 		}
 		if stoppedStatus, stopped, err := r.stopRequested(ctx, pr); err != nil {
 			return run, pr, state.StatusFailed, err

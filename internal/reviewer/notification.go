@@ -39,6 +39,13 @@ func (r *Runner) NotifyFinished(ctx context.Context, pr state.PullRequest, statu
 	return r.notify(ctx, "PR review finished", pr, message)
 }
 
+func (r *Runner) notifyDuplicatePrevented(ctx context.Context, pr state.PullRequest) error {
+	if !r.Config.Notification.Enabled || !r.Config.Notification.Failed {
+		return nil
+	}
+	return r.notify(ctx, "Duplicate review prevented", pr, "A review already exists for this head")
+}
+
 func NotifyDetected(ctx context.Context, cfg config.Config, prs []state.PullRequest) error {
 	if !cfg.Notification.Enabled || !cfg.Notification.Detected || len(prs) == 0 {
 		return nil
