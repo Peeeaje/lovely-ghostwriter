@@ -27,6 +27,7 @@ type fakeStore struct {
 	failedRunID int64
 	reviewed    []int
 	updates     map[int]bool
+	requestKeys map[int][]string
 }
 
 func (f *fakeStore) MarkMissingStale(context.Context, string, []int) error {
@@ -35,6 +36,23 @@ func (f *fakeStore) MarkMissingStale(context.Context, string, []int) error {
 
 func (f *fakeStore) SetCurrentHead(context.Context, string, int, string) error {
 	return nil
+}
+
+func (f *fakeStore) RecordReviewRequests(_ context.Context, _ string, number int, keys []string) (bool, bool, error) {
+	if f.requestKeys == nil {
+		f.requestKeys = make(map[int][]string)
+	}
+	previous, known := f.requestKeys[number]
+	previousSet := make(map[string]bool)
+	for _, key := range previous {
+		previousSet[key] = true
+	}
+	hasNew := false
+	for _, key := range keys {
+		hasNew = hasNew || !previousSet[key]
+	}
+	f.requestKeys[number] = append([]string(nil), keys...)
+	return hasNew, known, nil
 }
 
 func (f *fakeStore) TargetExists(context.Context, string, int, string, string) (bool, error) {
@@ -135,6 +153,42 @@ func TestScanUsesDifferentInitialAndUpdateTriggers(t *testing.T) {
 	}
 	if store.prs[0].Status != state.StatusQueued || store.prs[1].Status != state.StatusDetected {
 		t.Fatalf("statuses = %s, %s", store.prs[0].Status, store.prs[1].Status)
+	}
+}
+
+func TestScanRequiresANewReviewRequestForUpdatedHead(t *testing.T) {
+	source := fakeSource{prs: []gh.PullRequest{{
+		Number: 1, State: "OPEN", HeadSHA: "first", BaseBranch: "main", Author: gh.Actor{Login: "alice"},
+		ReviewRequests: []gh.ReviewRequest{{Login: "reviewer"}},
+	}}}
+	store := &fakeStore{updates: map[int]bool{}}
+	cfg := config.Default()
+	cfg.Repositories[0] = config.RepositoryConfig{
+		Name: "owner/repository", Path: "/tmp/repository", BaseBranches: []string{"main"},
+		Authors: []string{"alice"}, Reviewers: []string{"reviewer"},
+		InitialTrigger: config.TriggerReviewRequest, UpdateTrigger: config.TriggerReviewRequest,
+	}
+	scanner := New(&source, store)
+
+	first, err := scanner.Scan(context.Background(), cfg)
+	if err != nil || first.Queued != 1 {
+		t.Fatalf("initial Scan() result=%+v err=%v", first, err)
+	}
+	store.updates[1] = true
+	source.prs[0].HeadSHA = "second"
+	updated, err := scanner.Scan(context.Background(), cfg)
+	if err != nil || updated.Queued != 0 || updated.Detected != 1 {
+		t.Fatalf("updated Scan() result=%+v err=%v", updated, err)
+	}
+
+	source.prs[0].ReviewRequests = nil
+	if _, err := scanner.Scan(context.Background(), cfg); err != nil {
+		t.Fatal(err)
+	}
+	source.prs[0].ReviewRequests = []gh.ReviewRequest{{Login: "reviewer"}}
+	rerequested, err := scanner.Scan(context.Background(), cfg)
+	if err != nil || rerequested.Queued != 1 {
+		t.Fatalf("re-requested Scan() result=%+v err=%v", rerequested, err)
 	}
 }
 

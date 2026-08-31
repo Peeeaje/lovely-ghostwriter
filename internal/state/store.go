@@ -141,6 +141,13 @@ CREATE TABLE IF NOT EXISTS pull_request_targets (
   PRIMARY KEY (repository, number, head_sha, base_branch)
 );
 
+CREATE TABLE IF NOT EXISTS review_request_state (
+  repository TEXT NOT NULL,
+  number INTEGER NOT NULL,
+  request_keys TEXT NOT NULL,
+  PRIMARY KEY (repository, number)
+);
+
 CREATE TABLE IF NOT EXISTS runs (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   repository TEXT NOT NULL,
@@ -206,6 +213,38 @@ ON CONFLICT(repository, number) DO UPDATE SET head_sha = excluded.head_sha
 		return fmt.Errorf("set current pull request head: %w", err)
 	}
 	return nil
+}
+
+func (s *Store) RecordReviewRequests(ctx context.Context, repository string, number int, keys []string) (bool, bool, error) {
+	current := strings.Join(keys, "\n")
+	var previous string
+	err := s.db.QueryRowContext(ctx, `
+SELECT request_keys FROM review_request_state WHERE repository = ? AND number = ?
+`, repository, number).Scan(&previous)
+	known := err == nil
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return false, false, fmt.Errorf("read review request state: %w", err)
+	}
+	previousKeys := make(map[string]struct{})
+	for _, key := range strings.Split(previous, "\n") {
+		if key != "" {
+			previousKeys[key] = struct{}{}
+		}
+	}
+	hasNew := false
+	for _, key := range keys {
+		if _, exists := previousKeys[key]; !exists {
+			hasNew = true
+			break
+		}
+	}
+	if _, err := s.db.ExecContext(ctx, `
+INSERT INTO review_request_state (repository, number, request_keys) VALUES (?, ?, ?)
+ON CONFLICT(repository, number) DO UPDATE SET request_keys = excluded.request_keys
+`, repository, number, current); err != nil {
+		return false, false, fmt.Errorf("save review request state: %w", err)
+	}
+	return hasNew, known, nil
 }
 
 func (s *Store) MarkMissingStale(ctx context.Context, repository string, openNumbers []int) error {

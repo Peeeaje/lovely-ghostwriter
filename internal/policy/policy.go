@@ -2,6 +2,7 @@ package policy
 
 import (
 	"slices"
+	"sort"
 
 	"github.com/Peeeaje/lovely-ghostwriter/internal/config"
 	gh "github.com/Peeeaje/lovely-ghostwriter/internal/github"
@@ -30,12 +31,27 @@ func Automatic(repository config.RepositoryConfig, pr gh.PullRequest, marker, re
 	if trigger == config.TriggerManual {
 		return false
 	}
+	return len(MatchingReviewRequestKeys(repository, pr)) > 0
+}
+
+func MatchingReviewRequestKeys(repository config.RepositoryConfig, pr gh.PullRequest) []string {
+	keys := make(map[string]struct{})
 	for _, request := range pr.ReviewRequests {
-		if slices.Contains(repository.Reviewers, request.Login) ||
-			slices.Contains(repository.Teams, request.Slug) ||
-			slices.Contains(repository.Teams, request.Name) {
-			return true
+		if slices.Contains(repository.Reviewers, request.Login) {
+			keys["user:"+request.Login] = struct{}{}
+		}
+		if slices.Contains(repository.Teams, request.Slug) || slices.Contains(repository.Teams, request.Name) {
+			team := request.Slug
+			if team == "" {
+				team = request.Name
+			}
+			keys["team:"+team] = struct{}{}
 		}
 	}
-	return false
+	result := make([]string, 0, len(keys))
+	for key := range keys {
+		result = append(result, key)
+	}
+	sort.Strings(result)
+	return result
 }

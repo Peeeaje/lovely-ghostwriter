@@ -112,7 +112,7 @@ update_trigger = "review-request"
 
 An empty `authors` list allows every author except `exclude_authors`. With the default trigger, a pull request must be requested from one of the configured users or teams. Pull requests targeting `base_branches` are queued; other matching pull requests are recorded as detected only.
 
-`initial_trigger` and `update_trigger` accept `review-request`, `always`, or `manual`. The default keeps both phases gated by a matching GitHub review request.
+`initial_trigger` and `update_trigger` accept `review-request`, `always`, or `manual`. The default keeps both phases gated by a newly added matching GitHub review request. A request left on the pull request does not start another review when only the head changes; remove and re-request review to run it again.
 
 `workspace-write` confines writes to the review artifacts and worktree. A host Docker socket outside those directories can be exposed explicitly with `extra_args` instead of granting unrestricted access. See [Troubleshooting](docs/troubleshooting.md#docker-works-in-the-terminal-but-not-in-a-review).
 
@@ -138,7 +138,7 @@ Patch mode asks Codex to orchestrate review, patchable blocking fixes, and re-re
 
 Review processes share Codex authentication but ignore the interactive user's Codex configuration. This keeps desktop notification hooks, plugins, memories, MCP servers, and unrelated personal settings out of unattended reviews. The daemon supplies its model, reasoning effort, and sandbox explicitly without pinning internal Codex feature flags.
 
-On macOS, `notification.command = "auto"` prefers `terminal-notifier` and falls back to `osascript`. Started, finished, and failed notifications include the pull request title. A newly detected pull request outside `base_branches` also sends one notification; a single-item notification opens the pull request when clicked. `notification.timeout` prevents a broken notifier from blocking review workers.
+On macOS, `notification.command = "auto"` prefers `terminal-notifier` and falls back to `osascript`. Started, finished, and failed notifications include the pull request title. A newly detected pull request outside `base_branches` also sends one notification; a single-item notification opens the pull request when clicked. If a review for the same head appears while a run is preparing its submission, the duplicate is suppressed and reported as a warning notification. `notification.timeout` prevents a broken notifier from blocking review workers.
 
 Validate the local environment before starting the daemon:
 

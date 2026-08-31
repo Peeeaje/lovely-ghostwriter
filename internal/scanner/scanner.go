@@ -18,6 +18,7 @@ type PullRequestSource interface {
 type PullRequestStore interface {
 	MarkMissingStale(context.Context, string, []int) error
 	SetCurrentHead(context.Context, string, int, string) error
+	RecordReviewRequests(context.Context, string, int, []string) (bool, bool, error)
 	UpsertPullRequest(context.Context, state.PullRequest) (bool, error)
 	HasPreviousTarget(context.Context, string, int, string, string) (bool, error)
 	TargetExists(context.Context, string, int, string, string) (bool, error)
@@ -63,6 +64,10 @@ func (s *Scanner) Scan(ctx context.Context, cfg config.Config) (Result, error) {
 			if err := s.store.SetCurrentHead(ctx, repository.Name, pr.Number, pr.HeadSHA); err != nil {
 				return result, err
 			}
+			newReviewRequest, knownReviewRequests, err := s.store.RecordReviewRequests(ctx, repository.Name, pr.Number, policy.MatchingReviewRequestKeys(repository, pr))
+			if err != nil {
+				return result, err
+			}
 			if gh.HasMarker(pr, review.Marker, pr.HeadSHA, pr.BaseBranch, reviewer) {
 				runID, failed, err := s.store.LatestFailedRunID(ctx, repository.Name, pr.Number, pr.HeadSHA)
 				if err != nil {
@@ -80,13 +85,13 @@ func (s *Scanner) Scan(ctx context.Context, cfg config.Config) (Result, error) {
 				result.Skipped++
 				continue
 			}
-			trigger := repository.Trigger(false)
-			if trigger != repository.Trigger(true) {
-				isUpdate, err := s.store.HasPreviousTarget(ctx, repository.Name, pr.Number, pr.HeadSHA, pr.BaseBranch)
-				if err != nil {
-					return result, err
-				}
-				trigger = repository.Trigger(isUpdate)
+			isUpdate, err := s.store.HasPreviousTarget(ctx, repository.Name, pr.Number, pr.HeadSHA, pr.BaseBranch)
+			if err != nil {
+				return result, err
+			}
+			trigger := repository.Trigger(isUpdate)
+			if trigger == config.TriggerReviewRequest && (!newReviewRequest || (!knownReviewRequests && isUpdate)) {
+				trigger = config.TriggerManual
 			}
 
 			status := state.StatusDetected
