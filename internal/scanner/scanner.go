@@ -23,6 +23,7 @@ type PullRequestStore interface {
 	HasPreviousTarget(context.Context, string, int, string, string) (bool, error)
 	TargetExists(context.Context, string, int, string, string) (bool, error)
 	LatestFailedRunID(context.Context, string, int, string) (int64, bool, error)
+	HasRunningPullRequest(context.Context, string, int) (bool, error)
 	MarkReviewed(context.Context, string, int, string, int64) error
 }
 
@@ -123,6 +124,14 @@ func (s *Scanner) Scan(ctx context.Context, cfg config.Config) (Result, error) {
 			if status == state.StatusQueued {
 				result.Queued++
 			} else {
+				running, err := s.store.HasRunningPullRequest(ctx, repository.Name, pr.Number)
+				if err != nil {
+					return result, err
+				}
+				if running {
+					result.Skipped++
+					continue
+				}
 				result.Detected++
 				result.DetectedPullRequests = append(result.DetectedPullRequests, candidate)
 			}
