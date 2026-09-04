@@ -28,6 +28,7 @@ type fakeStore struct {
 	reviewed    []int
 	updates     map[int]bool
 	requestKeys map[int][]string
+	running     map[int]bool
 }
 
 func (f *fakeStore) MarkMissingStale(context.Context, string, []int) error {
@@ -65,6 +66,10 @@ func (f *fakeStore) HasPreviousTarget(_ context.Context, _ string, number int, _
 
 func (f *fakeStore) LatestFailedRunID(context.Context, string, int, string) (int64, bool, error) {
 	return f.failedRunID, f.failedRunID != 0, nil
+}
+
+func (f *fakeStore) HasRunningPullRequest(_ context.Context, _ string, number int) (bool, error) {
+	return f.running[number], nil
 }
 
 func (f *fakeStore) MarkReviewed(_ context.Context, _ string, number int, _ string, _ int64) error {
@@ -189,6 +194,35 @@ func TestScanRequiresANewReviewRequestForUpdatedHead(t *testing.T) {
 	rerequested, err := scanner.Scan(context.Background(), cfg)
 	if err != nil || rerequested.Queued != 1 {
 		t.Fatalf("re-requested Scan() result=%+v err=%v", rerequested, err)
+	}
+}
+
+func TestScanDoesNotNotifyDetectedHeadWhileReviewIsRunning(t *testing.T) {
+	source := fakeSource{prs: []gh.PullRequest{{
+		Number: 1, State: "OPEN", HeadSHA: "updated", BaseBranch: "main", Author: gh.Actor{Login: "alice"},
+		ReviewRequests: []gh.ReviewRequest{{Login: "reviewer"}},
+	}}}
+	store := &fakeStore{
+		updates:     map[int]bool{1: true},
+		requestKeys: map[int][]string{1: {"user:reviewer"}},
+		running:     map[int]bool{1: true},
+	}
+	cfg := config.Default()
+	cfg.Repositories[0] = config.RepositoryConfig{
+		Name: "owner/repository", Path: "/tmp/repository", BaseBranches: []string{"main"},
+		Authors: []string{"alice"}, Reviewers: []string{"reviewer"},
+		InitialTrigger: config.TriggerReviewRequest, UpdateTrigger: config.TriggerReviewRequest,
+	}
+
+	result, err := New(source, store).Scan(context.Background(), cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Queued != 0 || result.Detected != 0 || result.Skipped != 1 || len(result.DetectedPullRequests) != 0 {
+		t.Fatalf("Scan() result=%+v", result)
+	}
+	if len(store.prs) != 1 || store.prs[0].Status != state.StatusDetected {
+		t.Fatalf("stored pull requests=%+v", store.prs)
 	}
 }
 

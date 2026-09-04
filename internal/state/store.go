@@ -705,6 +705,20 @@ ORDER BY id DESC LIMIT 1
 	return runID, true, nil
 }
 
+func (s *Store) HasRunningPullRequest(ctx context.Context, repository string, number int) (bool, error) {
+	var running bool
+	err := s.db.QueryRowContext(ctx, `
+SELECT EXISTS (
+  SELECT 1 FROM pull_requests
+  WHERE repository = ? AND number = ? AND status = 'running'
+)
+`, repository, number).Scan(&running)
+	if err != nil {
+		return false, fmt.Errorf("check running pull request %s#%d: %w", repository, number, err)
+	}
+	return running, nil
+}
+
 func (s *Store) HasPreviousTarget(ctx context.Context, repository string, number int, headSHA, baseBranch string) (bool, error) {
 	var previous bool
 	err := s.db.QueryRowContext(ctx, `
